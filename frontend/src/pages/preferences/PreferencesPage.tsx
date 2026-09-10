@@ -174,7 +174,7 @@ export default function PreferencesPage() {
   }
 
   return (
-    <div className="animate-in space-y-6">
+    <div className="animate-in mx-auto w-full max-w-[1480px] space-y-6 px-3 sm:px-5 lg:px-10 xl:px-14">
       <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
         <div>
           <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-indigo-400">
