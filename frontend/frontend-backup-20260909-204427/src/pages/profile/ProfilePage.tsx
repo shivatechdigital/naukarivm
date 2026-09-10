@@ -151,7 +151,7 @@ export default function ProfilePage() {
   }
 
   return (
-    <div className="animate-in space-y-6">
+    <div className="animate-in space-y-6" style={{ marginTop: '20px' }}>
       <div>
         <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-indigo-400">
           <UserRound size={14} />
