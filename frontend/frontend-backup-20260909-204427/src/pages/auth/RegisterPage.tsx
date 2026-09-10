@@ -67,6 +67,7 @@ export default function RegisterPage() {
                     className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600"
                   />
                   <input
+                    style={{ paddingLeft: '32px' }}
                     className="input pl-10"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
@@ -84,6 +85,7 @@ export default function RegisterPage() {
                     className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600"
                   />
                   <input
+                    style={{ paddingLeft: '32px' }}
                     className="input pl-10"
                     type="email"
                     value={email}
@@ -103,7 +105,8 @@ export default function RegisterPage() {
                   />
 
                   <input
-                    className="input px-10"
+                    style={{ paddingLeft: '32px' }}
+                    className="input pl-10"
                     type={showPassword ? 'text' : 'password'}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}

@@ -131,6 +131,7 @@ export default function LoginPage() {
                     className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600"
                   />
                   <input
+                    style={{ paddingLeft: '32px' }}
                     className="input pl-10"
                     type="email"
                     value={email}
@@ -150,6 +151,7 @@ export default function LoginPage() {
                   />
 
                   <input
+                    style={{ paddingLeft: '32px' }}
                     className="input px-10"
                     type={showPassword ? 'text' : 'password'}
                     value={password}
