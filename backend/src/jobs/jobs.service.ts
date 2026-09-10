@@ -59,7 +59,7 @@ export class JobsService {
             userId,
             keyword,
             loc,
-            preferences?.experienceMin,
+            preferences?.experienceMin ?? undefined,
             maxPages,
           );
 
