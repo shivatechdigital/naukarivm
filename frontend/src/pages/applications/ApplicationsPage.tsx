@@ -20,6 +20,24 @@ export default function ApplicationsPage() {
 
   useEffect(() => {
     fetchApplications();
+
+    const refreshApplications = () => {
+      fetchApplications();
+    };
+
+    const handleStorageUpdate = (event: StorageEvent) => {
+      if (event.key === 'applications-updated-at') {
+        refreshApplications();
+      }
+    };
+
+    window.addEventListener('applications-updated', refreshApplications);
+    window.addEventListener('storage', handleStorageUpdate);
+
+    return () => {
+      window.removeEventListener('applications-updated', refreshApplications);
+      window.removeEventListener('storage', handleStorageUpdate);
+    };
   }, []);
 
   const fetchApplications = async () => {

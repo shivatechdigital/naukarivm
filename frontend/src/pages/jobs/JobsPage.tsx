@@ -12,6 +12,10 @@ import {
   Send,
 } from 'lucide-react';
 
+const getDescriptionText = (description: string) => {
+  const document = new DOMParser().parseFromString(description, 'text/html');
+  return (document.body.textContent || '').replace(/\s+/g, ' ').trim();
+};
 
 const formatPostedDate = (value: string | null | undefined) => {
   if (!value) return 'Date unavailable';
@@ -37,6 +41,11 @@ const formatPostedDate = (value: string | null | undefined) => {
     month: 'short',
     year: 'numeric',
   })}`;
+};
+
+const notifyApplicationsUpdated = () => {
+  window.dispatchEvent(new Event('applications-updated'));
+  window.localStorage.setItem('applications-updated-at', String(Date.now()));
 };
 
 export default function JobsPage() {
@@ -115,6 +124,7 @@ const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
         });
       }
 
+      notifyApplicationsUpdated();
       setStatusMsg(data?.message || 'Application processed successfully.');
       await fetchJobs();
     } catch (err: any) {
@@ -130,20 +140,16 @@ const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
   const handleApplyAll = async () => {
     if (applyingAll || applyingJobId) return;
 
-    const eligibleJobs = jobs.filter(
-      (job) =>
-        job.isEasyApply === true &&
-        !appliedJobIds.has(job.id),
-    );
+    const eligibleJobs = jobs.filter((job) => !appliedJobIds.has(job.id));
 
     if (eligibleJobs.length === 0) {
-      setStatusMsg('No Easy Apply jobs available on this page.');
+      setStatusMsg('No unapplied jobs available on this page.');
       return;
     }
 
     setApplyingAll(true);
     setStatusMsg(
-      `Applying to ${eligibleJobs.length} Easy Apply jobs...`,
+      `Applying to ${eligibleJobs.length} jobs...`,
     );
 
     let applied = 0;
@@ -179,8 +185,11 @@ const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
           } else {
             failed++;
           }
+
+          notifyApplicationsUpdated();
         } catch {
           failed++;
+          notifyApplicationsUpdated();
         }
 
         setStatusMsg(
@@ -339,7 +348,7 @@ const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
       <button
         onClick={() => handleApply(job.id)}
         disabled={applyingJobId !== null}
-        className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-700 disabled:text-gray-400 text-white text-xs px-3 py-1.5 rounded-lg font-medium transition-colors"
+        className="flex items-center gap-1 bg-green-500/10 hover:bg-green-500/20 disabled:bg-gray-700 disabled:text-gray-400 text-green-400 border border-green-500/30 text-xs px-2.5 py-1 rounded-full font-medium transition-colors"
       >
         {applyingJobId === job.id ? (
           <>
@@ -389,7 +398,7 @@ const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
               {/* Description Snippet */}
               {job.description && (
                 <p className="text-gray-400 text-xs line-clamp-2 mb-3">
-                  {job.description}
+                  {getDescriptionText(job.description)}
                 </p>
               )}
 

@@ -208,8 +208,6 @@ export class ProfilesService {
           profile.preferredCities,
         ) &&
         profile.preferredCities.length > 0,
-      resumeUrl:
-        !!profile.resumeUrl,
     };
 
     const total =

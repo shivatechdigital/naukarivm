@@ -10,6 +10,7 @@ import {
   Menu,
   Target,
   X,
+  Send,
 } from 'lucide-react'
 import { useAuth } from '../../hooks/useAuth'
 
@@ -18,6 +19,7 @@ const navItems = [
   { label: 'My Profile', path: '/profile', icon: CircleUserRound },
   { label: 'Job Preferences', path: '/preferences', icon: Target },
   { label: 'Jobs', path: '/jobs', icon: BriefcaseBusiness },
+  { label: 'Applications', path: '/applications', icon: Send },
 ]
 
 export default function AppLayout() {
@@ -35,7 +37,7 @@ export default function AppLayout() {
   }
 
   return (
-    <div className="min-h-screen bg-[#070b14] text-slate-100">
+    <div className="min-h-screen overflow-x-hidden bg-[#070b14] text-slate-100">
       <div className="flex min-h-screen">
 
         {mobileOpen && (
@@ -179,7 +181,7 @@ export default function AppLayout() {
             </div>
           </header>
 
-          <main className="mx-auto w-full max-w-[1500px] p-4 md:p-7">
+          <main className="mx-auto w-full max-w-[1500px] p-3 sm:p-4 md:p-7">
             <Outlet />
           </main>
         </div>

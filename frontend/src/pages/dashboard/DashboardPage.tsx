@@ -6,7 +6,6 @@ import {
   Play,
   Loader2,
   CheckCircle,
-  Terminal,
   ArrowRight,
   Activity,
 } from 'lucide-react';
@@ -17,29 +16,25 @@ export default function DashboardPage() {
   const [naukriStatus, setNaukriStatus] = useState<any>(null);
   const [showNaukriModal, setShowNaukriModal] = useState(false);
   const [runningCycle, setRunningCycle] = useState(false);
-  const [logs, setLogs] = useState<any[]>([]);
   const [message, setMessage] = useState('');
   const [stats, setStats] = useState({
     totalApplied: 0,
     jobsFoundToday: 0,
     failed: 0,
   });
+  const [preferences, setPreferences] = useState<any>(null);
 
   useEffect(() => {
     fetchNaukriStatus();
-    fetchActivityLogs();
     fetchDashboardStats();
+    API.get('/preferences/me')
+      .then(({ data }) => setPreferences(data?.preferences || data))
+      .catch(() => {});
   }, []);
 
   const fetchNaukriStatus = () => {
     API.get('/naukri/status')
       .then(({ data }) => setNaukriStatus(data))
-      .catch(() => {});
-  };
-
-  const fetchActivityLogs = () => {
-    API.get('/automation/logs?limit=10')
-      .then(({ data }) => setLogs(data || []))
       .catch(() => {});
   };
 
@@ -62,13 +57,22 @@ export default function DashboardPage() {
       const { data } = await API.post('/automation/trigger');
       setMessage(`🚀 ${data.message}`);
       setTimeout(() => {
-        fetchActivityLogs();
         fetchDashboardStats();
       }, 4000);
     } catch (err: any) {
       setMessage(err.response?.data?.message || 'Automation trigger failed');
     } finally {
       setRunningCycle(false);
+    }
+  };
+
+  const handleDisconnectNaukri = async () => {
+    try {
+      await API.delete('/naukri/disconnect');
+      setNaukriStatus({ isConnected: false });
+      setMessage('Naukri session disconnected.');
+    } catch (err: any) {
+      setMessage(err.response?.data?.message || 'Unable to disconnect Naukri.');
     }
   };
 
@@ -173,7 +177,11 @@ export default function DashboardPage() {
             <p className="text-gray-400 text-xs uppercase font-medium">
               Job Target
             </p>
-            <h3 className="text-white font-semibold mt-1">DevOps Engine</h3>
+            <h3 className="text-white font-semibold mt-1">
+              {preferences?.jobTitles?.length
+                ? preferences.jobTitles.slice(0, 2).join(', ')
+                : 'Not configured'}
+            </h3>
           </div>
           <Link
             to="/preferences"
@@ -199,7 +207,14 @@ export default function DashboardPage() {
               )}
             </h3>
           </div>
-          {!naukriStatus?.isConnected && (
+          {naukriStatus?.isConnected ? (
+            <button
+              onClick={handleDisconnectNaukri}
+              className="text-xs bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/30 px-3 py-1.5 rounded-lg"
+            >
+              Disconnect
+            </button>
+          ) : (
             <button
               onClick={() => setShowNaukriModal(true)}
               className="text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg"
@@ -210,50 +225,32 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Live Automation Logs Terminal */}
+      {/* Account activity overview */}
       <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-            <Terminal className="w-5 h-5 text-blue-500" />
-            Background Activity Logs
+            <Activity className="w-5 h-5 text-blue-500" />
+            Application overview
           </h2>
-          <button
-            onClick={fetchActivityLogs}
-            className="text-xs text-gray-400 hover:text-white"
-          >
-            Refresh Logs
-          </button>
+          <span className="text-xs text-gray-500">Your account only</span>
         </div>
-
-        <div className="space-y-3">
-          {logs.length === 0 ? (
-            <p className="text-gray-500 text-sm py-4 text-center">
-              No activity logs recorded yet.
-            </p>
-          ) : (
-            logs.map((log) => (
-              <div
-                key={log.id}
-                className="bg-gray-950 border border-gray-800/80 rounded-xl p-4 font-mono text-xs flex flex-col md:flex-row md:items-center justify-between gap-2"
-              >
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-blue-400 font-bold">
-                      [{log.action}]
-                    </span>
-                    <span className="text-gray-300">{log.message}</span>
-                  </div>
-                  <p className="text-gray-500 text-[11px]">
-                    Scraped: {log.jobsFound || 0} | Matched: {log.jobsMatched || 0} | Applied: {log.jobsApplied || 0}
-                  </p>
-                </div>
-
-                <div className="text-gray-500 text-[11px] flex-shrink-0">
-                  {new Date(log.createdAt).toLocaleTimeString()}
-                </div>
+        <div className="grid grid-cols-3 gap-3 items-end h-36">
+          {[
+            ['Found', stats.jobsFoundToday, 'bg-blue-500'],
+            ['Applied', stats.totalApplied, 'bg-emerald-500'],
+            ['Failed', stats.failed, 'bg-red-500'],
+          ].map(([label, value, color]) => (
+            <div key={String(label)} className="h-full flex flex-col justify-end gap-2">
+              <div className="text-xs text-gray-500">{label}</div>
+              <div className="flex items-end gap-2 h-24">
+                <div
+                  className={`w-full rounded-t-lg ${color}`}
+                  style={{ height: `${Math.max(8, Math.min(100, Number(value) || 0))}%` }}
+                />
               </div>
-            ))
-          )}
+              <div className="text-sm font-semibold text-white">{value}</div>
+            </div>
+          ))}
         </div>
       </div>
 

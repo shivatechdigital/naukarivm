@@ -47,6 +47,7 @@ export class MatchingService {
 
     const jobs = await this.prisma.job.findMany({
       where: {
+        userId,
         isExpired: false,
         id: { notIn: Array.from(appliedJobIds) },
       },

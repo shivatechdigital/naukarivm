@@ -135,9 +135,7 @@ export function parsePostedDate(value: unknown): Date | undefined {
   if (
     lower === 'today' ||
     lower === 'just now' ||
-    lower.includes('few hours ago') ||
-    lower.includes('hour ago') ||
-    lower.includes('hours ago')
+    lower.includes('few hours ago')
   ) {
     return now;
   }

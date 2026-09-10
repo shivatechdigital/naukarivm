@@ -62,7 +62,7 @@ export default function ProfilePage() {
         api.get('/profiles/completion'),
       ])
 
-      const data = profileResponse.data || emptyProfile
+      const data = profileResponse.data?.profile || profileResponse.data || emptyProfile
 
       setProfile(data)
       setSkillsText((data.skills || []).join(', '))
@@ -121,6 +121,8 @@ export default function ProfilePage() {
         .split(',')
         .map((x) => x.trim())
         .filter(Boolean),
+      resumeUrl: profile.resumeUrl?.trim() || undefined,
+      naukriProfileUrl: profile.naukriProfileUrl?.trim() || undefined,
     }
 
     try {
@@ -128,7 +130,7 @@ export default function ProfilePage() {
         await api.put('/profiles/me', payload)
       } else {
         const response = await api.post('/profiles', payload)
-        setProfile(response.data)
+        setProfile(response.data?.profile || response.data)
       }
 
       setMessage('Profile saved successfully.')

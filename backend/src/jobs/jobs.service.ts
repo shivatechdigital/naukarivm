@@ -33,7 +33,9 @@ export class JobsService {
     const locations =
       dto?.customLocations && dto.customLocations.length > 0
         ? dto.customLocations
-        : ['']; 
+        : preferences?.locations && preferences.locations.length > 0
+        ? preferences.locations
+        : [''];
 
     const maxPages = dto?.maxPagesPerQuery || 1;
     const startTime = new Date();
@@ -57,20 +59,34 @@ export class JobsService {
             userId,
             keyword,
             loc,
-            undefined, // No experience filter
+            preferences?.experienceMin,
             maxPages,
           );
 
           totalScraped += scrapedItems.length;
 
           // Exclusions check
+          const preferenceFilteredItems = scrapedItems.filter((item) => {
+            const min = item.experienceMin ?? 0;
+            const max = item.experienceMax ?? Number.POSITIVE_INFINITY;
+            const matchesExperience =
+              (preferences?.experienceMin === null || preferences?.experienceMin === undefined || max >= preferences.experienceMin) &&
+              (preferences?.experienceMax === null || preferences?.experienceMax === undefined || min <= preferences.experienceMax);
+            const matchesLocation =
+              !preferences?.locations?.length ||
+              preferences.locations.some((location) =>
+                (item.location || '').toLowerCase().includes(location.toLowerCase()),
+              );
+            return matchesExperience && matchesLocation;
+          });
+
           const filteredItems = this.applyExclusions(
-            scrapedItems,
+            preferenceFilteredItems,
             preferences?.excludedCompanies || [],
             preferences?.excludedKeywords || [],
           );
 
-          const savedCount = await this.saveScrapedJobs(filteredItems);
+          const savedCount = await this.saveScrapedJobs(filteredItems, userId);
           totalSaved += savedCount;
         }
       }
@@ -108,7 +124,7 @@ export class JobsService {
     }
   }
 
-  private async saveScrapedJobs(items: ScrapedJobItem[]): Promise<number> {
+  private async saveScrapedJobs(items: ScrapedJobItem[], userId?: string): Promise<number> {
     let saved = 0;
 
     for (const item of items) {
@@ -135,6 +151,7 @@ export class JobsService {
             skills: item.skills,
             isEasyApply: item.isEasyApply,
             scrapedAt: new Date(),
+            userId,
           },
           create: {
             naukriJobId: item.naukriJobId || undefined,
@@ -154,6 +171,7 @@ export class JobsService {
             url: item.url,
             isEasyApply: item.isEasyApply,
             postedDate: item.postedDate,
+            userId,
           },
         });
         saved++;
@@ -187,14 +205,16 @@ export class JobsService {
   async findAll(userId: string, dto: FilterJobsDto) {
     const { page, limit, search, location } = dto;
     const skip = (page - 1) * limit;
+    const preferences = await this.prisma.jobPreference.findUnique({
+      where: { userId },
+    });
 
-    // Hide jobs already processed by this user.
-    // Keep PENDING applications visible so Apply All can continue processing them.
+    // Hide only successfully processed jobs so failed/skipped jobs remain retryable.
     const processedApplications = await this.prisma.application.findMany({
       where: {
         userId,
         status: {
-          in: ['APPLIED', 'ALREADY_APPLIED', 'FAILED', 'SKIPPED'],
+          in: ['APPLIED', 'ALREADY_APPLIED'],
         },
       },
       select: {
@@ -207,11 +227,27 @@ export class JobsService {
     );
 
     const where: any = {
+      userId,
       isExpired: false,
       ...(processedJobIds.length > 0
         ? { id: { notIn: processedJobIds } }
         : {}),
     };
+
+    where.AND = [];
+    if (preferences?.experienceMin !== null && preferences?.experienceMin !== undefined) {
+      where.AND.push({ experienceMax: { gte: preferences.experienceMin } });
+    }
+    if (preferences?.experienceMax !== null && preferences?.experienceMax !== undefined) {
+      where.AND.push({ experienceMin: { lte: preferences.experienceMax } });
+    }
+    if (preferences?.locations?.length) {
+      where.AND.push({
+        OR: preferences.locations.map((preferredLocation) => ({
+          location: { contains: preferredLocation, mode: 'insensitive' },
+        })),
+      });
+    }
 
     if (search) {
       where.OR = [

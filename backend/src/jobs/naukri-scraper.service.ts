@@ -4,6 +4,7 @@ import { BrowserManager } from '../automation/playwright/browser.manager';
 import {
   parseSalary,
   parseExperience,
+  parsePostedDate,
 } from './utils/naukri-parser.util';
 
 export interface ScrapedJobItem {
@@ -34,38 +35,6 @@ export class NaukriScraperService {
     private naukriService: NaukriService,
     private browserManager: BrowserManager,
   ) {}
-
-  // Helper to convert "X Days Ago" into a real Date object
-  private parseNaukriDate(label: string): Date {
-    const now = new Date();
-    if (!label) return now;
-
-    const lowerLabel = label.toLowerCase();
-    
-    if (lowerLabel.includes('just now') || lowerLabel.includes('today')) {
-      return now;
-    }
-
-    // "1 Day Ago", "2 Days Ago"
-    const daysMatch = lowerLabel.match(/(\d+)\s*day/);
-    if (daysMatch) {
-      now.setDate(now.getDate() - parseInt(daysMatch[1], 10));
-      return now;
-    }
-
-    // "30+ Days Ago"
-    if (lowerLabel.includes('30+')) {
-      now.setDate(now.getDate() - 31);
-      return now;
-    }
-
-    // "Few hours ago"
-    if (lowerLabel.includes('hour')) {
-      return now;
-    }
-
-    return now;
-  }
 
   async scrapeByQuery(
     userId: string,
@@ -149,7 +118,7 @@ export class NaukriScraperService {
         
         // ─── EXTRACT REAL POSTED TIME ───
         const postedLabel = job.footerPlaceholderLabel || ''; // e.g., "1 Day Ago"
-        const postedDate = this.parseNaukriDate(postedLabel);
+        const postedDate = parsePostedDate(postedLabel);
 
         let expText = '0-5 Yrs';
         let salaryText = 'Not Disclosed';

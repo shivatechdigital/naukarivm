@@ -5,3 +5,6 @@ dist/
 .DS_Store
 coverage/
 .playwright/
+.env.*
+!.env.example
+node_modules/

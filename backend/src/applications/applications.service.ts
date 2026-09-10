@@ -177,22 +177,6 @@ export class ApplicationsService {
       };
     }
 
-    if (!job.isEasyApply) {
-      return {
-        success: false,
-        status: 'SKIPPED',
-        message: 'This job is not marked as Easy Apply.',
-      };
-    }
-
-    if (!job.url) {
-      return {
-        success: false,
-        status: 'FAILED',
-        message: 'Job URL is missing.',
-      };
-    }
-
     let application = await this.prisma.application.findUnique({
       where: {
         userId_jobId: {
@@ -228,6 +212,40 @@ export class ApplicationsService {
           status: 'PENDING',
         },
       });
+    }
+
+    if (!job.isEasyApply) {
+      await this.prisma.application.update({
+        where: { id: application.id },
+        data: {
+          status: 'SKIPPED',
+          errorMessage: 'This job is not marked as Easy Apply.',
+        },
+      });
+
+      return {
+        success: false,
+        status: 'SKIPPED',
+        message: 'This job is not marked as Easy Apply.',
+        applicationId: application.id,
+      };
+    }
+
+    if (!job.url) {
+      await this.prisma.application.update({
+        where: { id: application.id },
+        data: {
+          status: 'FAILED',
+          errorMessage: 'Job URL is missing.',
+        },
+      });
+
+      return {
+        success: false,
+        status: 'FAILED',
+        message: 'Job URL is missing.',
+        applicationId: application.id,
+      };
     }
 
     await this.prisma.application.update({
@@ -339,6 +357,7 @@ export class ApplicationsService {
 
       this.prisma.job.count({
         where: {
+          userId,
           scrapedAt: {
             gte: today,
           },
