@@ -57,19 +57,19 @@ export default function ProfilePage() {
     try {
       setLoading(true)
 
-      const [profileResponse, completionResponse] = await Promise.all([
-        api.get('/profiles/me'),
-        api.get('/profiles/completion'),
-      ])
-
+      const profileResponse = await api.get('/profiles/me')
       const data = profileResponse.data?.profile || profileResponse.data || emptyProfile
 
       setProfile(data)
       setSkillsText((data.skills || []).join(', '))
       setPreferredCitiesText((data.preferredCities || []).join(', '))
 
-      const value = completionResponse.data?.completion
-      setCompletion(Number(value || 0))
+      try {
+        const completionResponse = await api.get('/profiles/completion')
+        setCompletion(Number(completionResponse.data?.completion || 0))
+      } catch {
+        setCompletion(0)
+      }
     } catch (err: any) {
       if (err?.response?.status !== 404) {
         setError(

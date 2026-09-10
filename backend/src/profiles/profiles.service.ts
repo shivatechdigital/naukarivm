@@ -89,9 +89,11 @@ export class ProfilesService {
       });
 
     if (!existing) {
-      throw new NotFoundException(
-        'Profile nahi mila. Pehle create karo.',
-      );
+      const created = await this.create(userId, dto as CreateProfileDto);
+      return {
+        message: 'Profile update ho gaya! ✅',
+        profile: created.profile,
+      };
     }
 
     const data: any = {};
