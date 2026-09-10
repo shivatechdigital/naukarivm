@@ -1,0 +1,359 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { PrismaService } from '../prisma.service';
+import { NaukriApplyService } from './naukri-apply.service';
+
+@Injectable()
+export class ApplicationsService {
+  private readonly logger = new Logger(ApplicationsService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private naukriApplyService: NaukriApplyService,
+  ) {}
+
+  // ══════════════════════════════════════════════════
+  // PROCESS PENDING EASY-APPLY JOBS
+  // ══════════════════════════════════════════════════
+  async processPendingApplications(
+    userId: string,
+    limitCount: number = 5,
+  ) {
+    this.logger.log(
+      `Processing pending applications for user ${userId}, limit: ${limitCount}`,
+    );
+
+    const pendingApps = await this.prisma.application.findMany({
+      where: {
+        userId,
+        status: 'PENDING',
+        job: {
+          isEasyApply: true,
+        },
+      },
+      include: {
+        job: true,
+      },
+      take: limitCount,
+      orderBy: {
+        matchScore: 'desc',
+      },
+    });
+
+    if (pendingApps.length === 0) {
+      return {
+        message: 'No PENDING Easy-Apply jobs found.',
+        processedCount: 0,
+        appliedCount: 0,
+        alreadyAppliedCount: 0,
+        skippedCount: 0,
+        failedCount: 0,
+      };
+    }
+
+    let appliedCount = 0;
+    let failedCount = 0;
+    let skippedCount = 0;
+    let alreadyAppliedCount = 0;
+
+    for (const app of pendingApps) {
+      try {
+        // Mark as APPLYING
+        await this.prisma.application.update({
+          where: { id: app.id },
+          data: {
+            status: 'APPLYING',
+            errorMessage: null,
+          },
+        });
+
+        const result = await this.naukriApplyService.applyToJob(
+          userId,
+          app.job.url ?? '',
+          app.job.naukriJobId || app.job.id,
+        );
+
+        if (result.alreadyApplied) {
+          alreadyAppliedCount++;
+
+          await this.prisma.application.update({
+            where: { id: app.id },
+            data: {
+              status: 'ALREADY_APPLIED',
+              appliedAt: new Date(),
+              errorMessage: null,
+            },
+          });
+        } else if (result.success) {
+          appliedCount++;
+
+          await this.prisma.application.update({
+            where: { id: app.id },
+            data: {
+              status: 'APPLIED',
+              appliedAt: new Date(),
+              errorMessage: null,
+            },
+          });
+
+          this.logger.log(
+            `✅ Application marked APPLIED: ${app.job.naukriJobId || app.job.id}`,
+          );
+        } else if (result.statusText === 'SKIPPED') {
+          skippedCount++;
+
+          await this.prisma.application.update({
+            where: { id: app.id },
+            data: {
+              status: 'SKIPPED',
+              errorMessage:
+                result.errorMessage || 'Skipped external site redirect',
+            },
+          });
+        } else {
+          failedCount++;
+
+          await this.prisma.application.update({
+            where: { id: app.id },
+            data: {
+              status: 'FAILED',
+              errorMessage: result.errorMessage || 'Apply failed',
+            },
+          });
+        }
+      } catch (error: any) {
+        failedCount++;
+
+        this.logger.error(
+          `❌ Application processing error for ${app.id}: ${
+            error?.message || error
+          }`,
+        );
+
+        try {
+          await this.prisma.application.update({
+            where: { id: app.id },
+            data: {
+              status: 'FAILED',
+              errorMessage:
+                error?.message || 'Unexpected application processing error',
+            },
+          });
+        } catch (dbError: any) {
+          this.logger.error(
+            `❌ Failed to update application status: ${
+              dbError?.message || dbError
+            }`,
+          );
+        }
+      }
+
+      // Small delay between applications
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+
+    return {
+      message: `Auto-Apply finished! 🎉 Applied: ${appliedCount}, Already Applied: ${alreadyAppliedCount}, Skipped: ${skippedCount}, Failed: ${failedCount}`,
+      processedCount: pendingApps.length,
+      appliedCount,
+      alreadyAppliedCount,
+      skippedCount,
+      failedCount,
+    };
+  }
+
+  async applySingleJob(
+    userId: string,
+    jobId: string,
+  ) {
+    const job = await this.prisma.job.findUnique({
+      where: { id: jobId },
+    });
+
+    if (!job) {
+      return {
+        success: false,
+        status: 'FAILED',
+        message: 'Job not found.',
+      };
+    }
+
+    if (!job.isEasyApply) {
+      return {
+        success: false,
+        status: 'SKIPPED',
+        message: 'This job is not marked as Easy Apply.',
+      };
+    }
+
+    if (!job.url) {
+      return {
+        success: false,
+        status: 'FAILED',
+        message: 'Job URL is missing.',
+      };
+    }
+
+    let application = await this.prisma.application.findUnique({
+      where: {
+        userId_jobId: {
+          userId,
+          jobId,
+        },
+      },
+    });
+
+    if (application?.status === 'APPLIED') {
+      return {
+        success: true,
+        status: 'ALREADY_APPLIED',
+        message: 'Already applied to this job.',
+        applicationId: application.id,
+      };
+    }
+
+    if (application?.status === 'APPLYING') {
+      return {
+        success: false,
+        status: 'APPLYING',
+        message: 'Application is already in progress.',
+        applicationId: application.id,
+      };
+    }
+
+    if (!application) {
+      application = await this.prisma.application.create({
+        data: {
+          userId,
+          jobId,
+          status: 'PENDING',
+        },
+      });
+    }
+
+    await this.prisma.application.update({
+      where: { id: application.id },
+      data: {
+        status: 'APPLYING',
+        errorMessage: null,
+      },
+    });
+
+    try {
+      const result = await this.naukriApplyService.applyToJob(
+        userId,
+        job.url,
+        job.naukriJobId || job.id,
+      );
+
+      if (result.alreadyApplied) {
+        await this.prisma.application.update({
+          where: { id: application.id },
+          data: {
+            status: 'ALREADY_APPLIED',
+            appliedAt: new Date(),
+            errorMessage: null,
+          },
+        });
+
+        return {
+          success: true,
+          status: 'ALREADY_APPLIED',
+          message: 'Already applied on Naukri.',
+          applicationId: application.id,
+        };
+      }
+
+      if (result.success) {
+        await this.prisma.application.update({
+          where: { id: application.id },
+          data: {
+            status: 'APPLIED',
+            appliedAt: new Date(),
+            errorMessage: null,
+          },
+        });
+
+        return {
+          success: true,
+          status: 'APPLIED',
+          message: 'Application submitted successfully! 🎉',
+          applicationId: application.id,
+        };
+      }
+
+      const status =
+        result.statusText === 'SKIPPED' ? 'SKIPPED' : 'FAILED';
+
+      await this.prisma.application.update({
+        where: { id: application.id },
+        data: {
+          status,
+          errorMessage: result.errorMessage || 'Apply failed',
+        },
+      });
+
+      return {
+        success: false,
+        status,
+        message: result.errorMessage || 'Application failed.',
+        applicationId: application.id,
+      };
+    } catch (error: any) {
+      await this.prisma.application.update({
+        where: { id: application.id },
+        data: {
+          status: 'FAILED',
+          errorMessage:
+            error?.message || 'Unexpected application error',
+        },
+      });
+
+      this.logger.error(
+        `Single-job application failed for ${jobId}: ${
+          error?.message || error
+        }`,
+      );
+
+      return {
+        success: false,
+        status: 'FAILED',
+        message: error?.message || 'Application failed.',
+        applicationId: application.id,
+      };
+    }
+  }
+
+  async getUserApplications(
+    userId: string,
+    page: number = 1,
+    limit: number = 20,
+  ) {
+    const skip = (page - 1) * limit;
+
+    const [total, applications] = await Promise.all([
+      this.prisma.application.count({
+        where: { userId },
+      }),
+
+      this.prisma.application.findMany({
+        where: { userId },
+        include: { job: true },
+        skip,
+        take: limit,
+        orderBy: {
+          createdAt: 'desc',
+        },
+      }),
+    ]);
+
+    return {
+      data: applications,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
+  }
+}

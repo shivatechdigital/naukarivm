@@ -1,0 +1,192 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { Page } from 'playwright';
+import { BrowserManager } from '../automation/playwright/browser.manager';
+import { NaukriService } from '../naukri/naukri.service';
+
+export interface ApplyResult {
+  success: boolean;
+  alreadyApplied?: boolean;
+  statusText: 'APPLIED' | 'ALREADY_APPLIED' | 'SKIPPED' | 'FAILED';
+  errorMessage?: string;
+}
+
+@Injectable()
+export class NaukriApplyService {
+  private readonly logger = new Logger(NaukriApplyService.name);
+
+  constructor(
+    private browserManager: BrowserManager,
+    private naukriService: NaukriService,
+  ) {}
+
+  async applyToJob(userId: string, jobUrl: string, jobId: string): Promise<ApplyResult> {
+    this.logger.log(`Starting Auto-Apply for Job ID: ${jobId}`);
+
+    const cookies = await this.naukriService.getDecryptedCookies(userId);
+    if (!cookies || cookies.length === 0) {
+      return {
+        success: false,
+        statusText: 'FAILED',
+        errorMessage: 'Naukri session cookies missing.',
+      };
+    }
+
+    let browser: any = null;
+
+    try {
+      const { browser: b, page } = await this.browserManager.createContext({ cookies });
+      browser = b;
+
+      this.logger.log(`Opening job page: ${jobUrl}`);
+      await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(3000);
+
+      // 1. Check if login session redirect happened
+      if (page.url().includes('/nlogin/login')) {
+        return {
+          success: false,
+          statusText: 'FAILED',
+          errorMessage: 'Naukri session expired. Please re-sync cookies.',
+        };
+      }
+
+      // 2. Check if Already Applied
+      const isAlreadyApplied = await page
+        .locator('button:has-text("Applied"), span:has-text("Already Applied"), .already-applied, [class*="already-applied"]')
+        .first()
+        .isVisible()
+        .catch(() => false);
+
+      if (isAlreadyApplied) {
+        this.logger.log(`Job ${jobId} is ALREADY APPLIED.`);
+        return { success: true, alreadyApplied: true, statusText: 'ALREADY_APPLIED' };
+      }
+
+      // 3. Multi-Selector Apply Button Finder
+      const applySelectors = [
+        'button#apply-button',
+        'button.apply-button',
+        '.apply-button-container button',
+        'button:has-text("Apply")',
+        'button.apply-main',
+        '[class*="apply-button"]',
+      ];
+
+      let applyBtn = null;
+      for (const sel of applySelectors) {
+        const el = page.locator(sel).first();
+        if (await el.isVisible().catch(() => false)) {
+          applyBtn = el;
+          break;
+        }
+      }
+
+      if (!applyBtn) {
+        this.logger.warn(`Apply button not visible on job ${jobId}`);
+        return {
+          success: false,
+          statusText: 'FAILED',
+          errorMessage: 'Apply button page par nahi mila.',
+        };
+      }
+
+      const btnText = (await applyBtn.innerText().catch(() => '')).trim();
+      this.logger.log(`Found button with text: "${btnText}"`);
+
+      // 4. Skip external website redirects
+      if (
+        btnText.toLowerCase().includes('company site') ||
+        btnText.toLowerCase().includes('website')
+      ) {
+        this.logger.log(`Job ${jobId} requires external redirect. SKIPPED.`);
+        return {
+          success: false,
+          statusText: 'SKIPPED',
+          errorMessage: 'Requires external company website redirect.',
+        };
+      }
+
+      // 5. Click Apply Button
+      await applyBtn.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(3000);
+
+      // 6. Handle Chatbot Drawer / Questionnaire Popup if opened
+      await this.handleQuestionnaireModal(page);
+
+      // 7. Verify Success Confirmation
+      await page.waitForTimeout(2500);
+
+      const isAppliedNow = await page
+        .locator('button:has-text("Applied"), span:has-text("Applied"), div:has-text("successfully applied"), div:has-text("Application sent"), [class*="success"]')
+        .first()
+        .isVisible()
+        .catch(() => false);
+
+      if (isAppliedNow) {
+        this.logger.log(`✅ Successfully Applied to Job ${jobId}!`);
+        return { success: true, statusText: 'APPLIED' };
+      }
+
+      // Fallback check: If apply button text changed
+      const updatedBtnText = (await applyBtn.innerText().catch(() => '')).trim();
+      if (updatedBtnText.toLowerCase().includes('applied')) {
+        this.logger.log(`✅ Job ${jobId} applied verified via button text change!`);
+        return { success: true, statusText: 'APPLIED' };
+      }
+
+      return {
+        success: false,
+        statusText: 'FAILED',
+        errorMessage: 'Apply click completed but confirmation badge not detected.',
+      };
+    } catch (err: any) {
+      this.logger.error(`Exception during apply for job ${jobId}: ${err.message}`);
+      return {
+        success: false,
+        statusText: 'FAILED',
+        errorMessage: err.message,
+      };
+    } finally {
+      if (browser) {
+        await this.browserManager.close(browser);
+      }
+    }
+  }
+
+  private async handleQuestionnaireModal(page: Page) {
+    try {
+      const drawerSelectors = [
+        '.chatbot_Drawer',
+        '[class*="drawer"]',
+        '.custom-questions-modal',
+        '.apply-message-container',
+      ];
+
+      let drawerVisible = false;
+      for (const sel of drawerSelectors) {
+        if (await page.locator(sel).first().isVisible().catch(() => false)) {
+          drawerVisible = true;
+          break;
+        }
+      }
+
+      if (drawerVisible) {
+        this.logger.log('Questionnaire drawer detected. Auto-submitting answers...');
+
+        const radios = page.locator('input[type="radio"], label:has(input[type="radio"])');
+        if (await radios.first().isVisible().catch(() => false)) {
+          await radios.first().click().catch(() => {});
+        }
+
+        const submitBtn = page
+          .locator('button:has-text("Save & Apply"), button:has-text("Submit"), button:has-text("Next"), button:has-text("Continue")')
+          .first();
+
+        if (await submitBtn.isVisible().catch(() => false)) {
+          await submitBtn.click().catch(() => {});
+          await page.waitForTimeout(2500);
+        }
+      }
+    } catch {}
+  }
+}

@@ -1,0 +1,281 @@
+import {
+  Injectable,
+  Logger,
+  BadRequestException,
+  InternalServerErrorException,
+} from '@nestjs/common';
+import { PrismaService } from '../prisma.service';
+import { EncryptionService } from './encryption.service';
+import { BrowserManager } from '../automation/playwright/browser.manager';
+import {
+  performNaukriLogin,
+  verifyNaukriSession,
+} from '../automation/playwright/naukri-login';
+import { ConnectNaukriDto } from './dto/connect-naukri.dto';
+
+@Injectable()
+export class NaukriService {
+  private readonly logger = new Logger(NaukriService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private encryption: EncryptionService,
+    private browserManager: BrowserManager,
+  ) {}
+
+  // ═══════════════════════════════════════
+  // CONNECT NAUKRI — Login + Save Session
+  // ═══════════════════════════════════════
+  async connect(userId: string, dto: ConnectNaukriDto) {
+    this.logger.log(`Connecting Naukri for user: ${userId}`);
+
+    let browser: any = null;
+
+    try {
+      // ─── Step 1: Browser kholo ───
+      const { browser: b, context, page } =
+        await this.browserManager.createContext();
+      browser = b;
+
+      // ─── Step 2: Naukri pe login karo ───
+      const loginResult = await performNaukriLogin(
+        page,
+        context,
+        dto.naukriEmail,
+        dto.naukriPassword,
+      );
+
+      // ─── Step 3: Result handle karo ───
+      if (!loginResult.success) {
+        // CAPTCHA ya OTP ya wrong password
+        if (loginResult.needsCaptcha) {
+          throw new BadRequestException({
+            message: loginResult.error,
+            code: 'CAPTCHA_DETECTED',
+          });
+        }
+        if (loginResult.needsOTP) {
+          throw new BadRequestException({
+            message: loginResult.error,
+            code: 'OTP_REQUIRED',
+          });
+        }
+        throw new BadRequestException(loginResult.error);
+      }
+
+      // ─── Step 4: Cookies encrypt karo ───
+      const cookiesJson = JSON.stringify(loginResult.cookies);
+      const { encrypted, iv } = this.encryption.encrypt(cookiesJson);
+
+      this.logger.log(
+        `Encrypted ${loginResult.cookies!.length} cookies for user ${userId}`,
+      );
+
+      // ─── Step 5: DB me save karo (upsert) ───
+      await this.prisma.naukriSession.upsert({
+        where: { userId },
+        update: {
+          encryptedCookies: encrypted,
+          encryptionIV: iv,
+          naukriEmail: dto.naukriEmail,
+          isValid: true,
+          lastVerifiedAt: new Date(),
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+          userAgent:
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+        create: {
+          userId,
+          encryptedCookies: encrypted,
+          encryptionIV: iv,
+          naukriEmail: dto.naukriEmail,
+          isValid: true,
+          lastVerifiedAt: new Date(),
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          userAgent:
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+      });
+
+      // ─── Step 6: Password BHUL JAO (never stored) ───
+      // dto.naukriPassword ab garbage collected hoga
+
+      return {
+        message: 'Naukri successfully connect ho gaya! 🎉',
+        naukriEmail: dto.naukriEmail,
+        userName: loginResult.userName,
+        cookiesCount: loginResult.cookies!.length,
+        sessionValidUntil: new Date(
+          Date.now() + 7 * 24 * 60 * 60 * 1000,
+        ).toISOString(),
+      };
+    } catch (err: any) {
+      if (err instanceof BadRequestException) throw err;
+
+      this.logger.error(`Naukri connect failed: ${err.message}`);
+      throw new InternalServerErrorException(
+        'Naukri connect karne me error aaya. Dobara try karo.',
+      );
+    } finally {
+      // ─── Cleanup: Browser band karo ───
+      if (browser) {
+        await this.browserManager.close(browser);
+      }
+    }
+  }
+
+  // ═══════════════════════════════════════
+  // VERIFY SESSION — Kya session valid hai?
+  // ═══════════════════════════════════════
+  async verifySession(userId: string) {
+    const session = await this.prisma.naukriSession.findUnique({
+      where: { userId },
+    });
+
+    if (!session) {
+      return {
+        isConnected: false,
+        message: 'Naukri connect nahi hai. Pehle connect karo.',
+      };
+    }
+
+    // Expiry check
+    if (session.expiresAt && session.expiresAt < new Date()) {
+      await this.prisma.naukriSession.update({
+        where: { userId },
+        data: { isValid: false },
+      });
+
+      return {
+        isConnected: true,
+        isValid: false,
+        message: 'Session expire ho gaya. Dobara connect karo.',
+        naukriEmail: session.naukriEmail,
+      };
+    }
+
+    // Browser se verify karo
+    let browser: any = null;
+
+    try {
+      // Decrypt cookies
+      const cookiesJson = this.encryption.decrypt(
+        session.encryptedCookies,
+        session.encryptionIV,
+      );
+      const cookies = JSON.parse(cookiesJson);
+
+      // Browser kholo with cookies
+      const { browser: b, context, page } =
+        await this.browserManager.createContext({
+          cookies,
+          userAgent: session.userAgent || undefined,
+        });
+      browser = b;
+
+      // Verify karo
+      const result = await verifyNaukriSession(page, context);
+
+      // DB update karo
+      await this.prisma.naukriSession.update({
+        where: { userId },
+        data: {
+          isValid: result.valid,
+          lastVerifiedAt: new Date(),
+        },
+      });
+
+      return {
+        isConnected: true,
+        isValid: result.valid,
+        naukriEmail: session.naukriEmail,
+        userName: result.userName,
+        lastVerified: session.lastVerifiedAt,
+        expiresAt: session.expiresAt,
+        message: result.valid
+          ? 'Session valid hai ✅'
+          : 'Session invalid ho gaya. Dobara connect karo.',
+      };
+    } catch (err: any) {
+      this.logger.error(`Session verify failed: ${err.message}`);
+      return {
+        isConnected: true,
+        isValid: false,
+        naukriEmail: session.naukriEmail,
+        message: 'Session verify nahi ho paya.',
+      };
+    } finally {
+      if (browser) {
+        await this.browserManager.close(browser);
+      }
+    }
+  }
+
+  // ═══════════════════════════════════════
+  // DISCONNECT — Session hatao
+  // ═══════════════════════════════════════
+  async disconnect(userId: string) {
+    await this.prisma.naukriSession.deleteMany({
+      where: { userId },
+    });
+
+    return {
+      message: 'Naukri disconnect ho gaya. Cookies delete ho gayi. 🔒',
+    };
+  }
+
+  // ═══════════════════════════════════════
+  // GET DECRYPTED COOKIES (Internal use only)
+  // Worker ke liye — API pe expose mat karna!
+  // ═══════════════════════════════════════
+  async getDecryptedCookies(userId: string): Promise<any[] | null> {
+    const session = await this.prisma.naukriSession.findUnique({
+      where: { userId, isValid: true },
+    });
+
+    if (!session) return null;
+
+    if (session.expiresAt && session.expiresAt < new Date()) return null;
+
+    try {
+      const cookiesJson = this.encryption.decrypt(
+        session.encryptedCookies,
+        session.encryptionIV,
+      );
+      return JSON.parse(cookiesJson);
+    } catch {
+      return null;
+    }
+  }
+
+  // ═══════════════════════════════════════
+  // STATUS — Quick check (no browser)
+  // ═══════════════════════════════════════
+  async getStatus(userId: string) {
+    const session = await this.prisma.naukriSession.findUnique({
+      where: { userId },
+      select: {
+        naukriEmail: true,
+        isValid: true,
+        lastVerifiedAt: true,
+        expiresAt: true,
+        createdAt: true,
+      },
+    });
+
+    if (!session) {
+      return { isConnected: false };
+    }
+
+    const isExpired =
+      session.expiresAt && session.expiresAt < new Date();
+
+    return {
+      isConnected: true,
+      isValid: session.isValid && !isExpired,
+      naukriEmail: session.naukriEmail,
+      lastVerified: session.lastVerifiedAt,
+      expiresAt: session.expiresAt,
+    };
+  }
+}

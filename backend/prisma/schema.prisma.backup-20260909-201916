@@ -1,0 +1,81 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  name         String
+  passwordHash String   @map("password_hash")
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  profile      Profile?
+  jobs         Job[]
+  applications Application[]
+
+  @@map("users")
+}
+
+model Profile {
+  id              String  @id @default(uuid())
+  userId          String  @unique
+  experience      Float?
+  currentCompany  String?
+  currentCtc      Float?
+  expectedCtc     Float?
+  noticePeriod    String?
+  skills          String?
+  location        String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("profiles")
+}
+
+model Job {
+  id            String   @id @default(uuid())
+  source        String
+  externalJobId String?
+  title         String
+  company       String?
+  location      String?
+  experience    String?
+  salary        String?
+  description   String?
+  url           String?
+  postedDate    DateTime?
+  createdAt     DateTime @default(now())
+
+  userId String?
+  user   User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  applications Application[]
+
+  @@index([source])
+  @@index([title])
+  @@map("jobs")
+}
+
+model Application {
+  id           String   @id @default(uuid())
+  userId       String
+  jobId        String
+  status       String   @default("PENDING")
+  matchScore   Float?
+  appliedAt    DateTime?
+  errorMessage String?
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  job  Job  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, jobId])
+  @@map("applications")
+}

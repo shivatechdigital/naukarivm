@@ -1,0 +1,291 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { Page } from 'playwright';
+import { BrowserManager } from '../automation/playwright/browser.manager';
+import { NaukriService } from '../naukri/naukri.service';
+import {
+  parseSalary,
+  parseExperience,
+  buildNaukriSearchUrl,
+} from './utils/naukri-parser.util';
+
+export interface ScrapedJobItem {
+  naukriJobId: string;
+  title: string;
+  company: string;
+  companyRating?: number;
+  companyReviews?: number;
+  location: string;
+  experience: string;
+  experienceMin?: number;
+  experienceMax?: number;
+  salary: string;
+  salaryMin?: number;
+  salaryMax?: number;
+  description: string;
+  skills: string[];
+  url: string;
+  isEasyApply: boolean;
+  postedDate?: Date;
+}
+
+@Injectable()
+export class NaukriScraperService {
+  private readonly logger = new Logger(NaukriScraperService.name);
+
+  constructor(
+    private browserManager: BrowserManager,
+    private naukriService: NaukriService,
+  ) {}
+
+  // ══════════════════════════════════════════════════
+  // SCRAPE JOBS FOR A GIVEN SEARCH CRITERIA
+  // ══════════════════════════════════════════════════
+  async scrapeByQuery(
+    userId: string,
+    keyword: string,
+    location: string,
+    experience?: number,
+    pagesToScrape: number = 2,
+  ): Promise<ScrapedJobItem[]> {
+    this.logger.log(
+      `Starting scrape for Keyword: "${keyword}", Location: "${location}", Exp: ${experience}`,
+    );
+
+    // Get user session cookies if available
+    const cookies = await this.naukriService.getDecryptedCookies(userId);
+
+    let browser: any = null;
+    const allScrapedJobs: ScrapedJobItem[] = [];
+
+    try {
+      const { browser: b, page } = await this.browserManager.createContext({
+        cookies: cookies || undefined,
+      });
+      browser = b;
+
+      for (let pageNo = 1; pageNo <= pagesToScrape; pageNo++) {
+        const targetUrl = buildNaukriSearchUrl({
+          keyword,
+          location,
+          experience,
+          page: pageNo,
+        });
+
+        this.logger.log(`Navigating to [Page ${pageNo}]: ${targetUrl}`);
+
+        const pageJobs = await this.scrapeSinglePage(page, targetUrl);
+        allScrapedJobs.push(...pageJobs);
+
+        this.logger.log(`Page ${pageNo} scraped: found ${pageJobs.length} jobs`);
+
+        // Natural pause between pages
+        if (pageNo < pagesToScrape) {
+          await page.waitForTimeout(2500 + Math.random() * 2000);
+        }
+      }
+
+      return allScrapedJobs;
+    } catch (err: any) {
+      this.logger.error(`Scraping failed for "${keyword}": ${err.message}`);
+      return allScrapedJobs;
+    } finally {
+      if (browser) {
+        await this.browserManager.close(browser);
+      }
+    }
+  }
+
+  // ══════════════════════════════════════════════════
+  // SCRAPE A SINGLE SRP (Search Results Page)
+  // ══════════════════════════════════════════════════
+  private async scrapeSinglePage(
+    page: Page,
+    url: string,
+  ): Promise<ScrapedJobItem[]> {
+    const jobs: ScrapedJobItem[] = [];
+
+    try {
+      const response = await page.goto(url, {
+        waitUntil: 'domcontentloaded',
+        timeout: 35000,
+      });
+
+      this.logger.log(
+        `Naukri navigation status: ${response?.status() ?? 'NO_RESPONSE'}`,
+      );
+
+      this.logger.log(
+        `Naukri final URL: ${page.url()}`,
+      );
+
+      this.logger.log(
+        `Naukri page title: ${await page.title()}`,
+      );
+
+      const bodyText = await page
+        .locator('body')
+        .innerText()
+        .catch(() => '');
+
+      this.logger.log(
+        `Naukri body preview: ${bodyText
+          .slice(0, 1000)
+          .replace(/\\s+/g, ' ')}`,
+      );
+
+      // Wait for job tuples or no-result containers
+      await page
+        .waitForSelector(
+          '.srp-jobtuple-wrapper, .cust-job-tuple, .jobTuple, [data-job-id]',
+          { timeout: 15000 },
+        )
+        .catch(() => {
+          this.logger.warn('No job tuples found or selector timed out.');
+        });
+
+      // Smooth scroll down to load lazy DOM elements
+      await this.autoScroll(page);
+
+      // Extract job cards
+      const jobCards = await page.$$(
+        '.srp-jobtuple-wrapper, .cust-job-tuple, .jobTuple',
+      );
+
+      for (const card of jobCards) {
+        try {
+          const item = await card.evaluate((el) => {
+            // 1. Title & URL
+            const titleEl = el.querySelector(
+              'a.title, a.job-title, [class*="title"]',
+            ) as HTMLAnchorElement;
+            const title = titleEl?.innerText?.trim() || '';
+            const jobUrl = titleEl?.href || '';
+
+            // 2. Job ID
+            const jobId =
+              el.getAttribute('data-job-id') ||
+              jobUrl.match(/jid-(\d+)/)?.[1] ||
+              jobUrl.split('-').pop()?.replace('.html', '') ||
+              '';
+
+            // 3. Company & Rating
+            const compEl = el.querySelector(
+              'a.comp-name, .company-name, [class*="compName"]',
+            ) as HTMLElement;
+            const company = compEl?.innerText?.trim() || 'Unknown Company';
+
+            const ratingEl = el.querySelector(
+              '.rating, .star-rating, [class*="rating"]',
+            ) as HTMLElement;
+            const ratingText = ratingEl?.innerText?.trim();
+            const companyRating = ratingText ? parseFloat(ratingText) : undefined;
+
+            const reviewsEl = el.querySelector(
+              '.review, .reviews-count, [class*="review"]',
+            ) as HTMLElement;
+            const reviewsText = reviewsEl?.innerText?.replace(/[^\d]/g, '');
+            const companyReviews = reviewsText ? parseInt(reviewsText, 10) : undefined;
+
+            // 4. Experience, Salary, Location tuples
+            const expEl = el.querySelector(
+              '.expwdth, .experience, [class*="exp"]',
+            ) as HTMLElement;
+            const experience = expEl?.innerText?.trim() || '0-5 Yrs';
+
+            const salEl = el.querySelector(
+              '.sal-wrap, .salary, [class*="sal"]',
+            ) as HTMLElement;
+            const salary = salEl?.innerText?.trim() || 'Not Disclosed';
+
+            const locEl = el.querySelector(
+              '.locWdth, .location, [class*="loc"]',
+            ) as HTMLElement;
+            const location = locEl?.innerText?.trim() || 'India';
+
+            // 5. Snippet Description
+            const descEl = el.querySelector(
+              '.job-desc, .job-description, [class*="jobDesc"]',
+            ) as HTMLElement;
+            const description = descEl?.innerText?.trim() || '';
+
+            // 6. Skill Tags
+            const tagEls = el.querySelectorAll(
+              '.tags-gt li, .dot-gt li, [class*="tags"] li, [class*="tag"]',
+            );
+            const skills: string[] = [];
+            tagEls.forEach((t) => {
+              const txt = (t as HTMLElement).innerText?.trim();
+              if (txt && txt.length > 0 && !skills.includes(txt)) {
+                skills.push(txt);
+              }
+            });
+
+            // 7. Apply type
+            // If button is 'Apply on company site' -> external, otherwise quick easy apply
+            const isExternal =
+              (el as HTMLElement).innerText.includes('Company Site') ||
+              (el as HTMLElement).innerText.includes('Apply on website');
+
+            return {
+              naukriJobId: jobId,
+              title,
+              company,
+              companyRating,
+              companyReviews,
+              location,
+              experience,
+              salary,
+              description,
+              skills,
+              url: jobUrl,
+              isEasyApply: !isExternal,
+            };
+          });
+
+          if (item.title && (item.url || item.naukriJobId)) {
+            const parsedSal = parseSalary(item.salary);
+            const parsedExp = parseExperience(item.experience);
+
+            jobs.push({
+              ...item,
+              salaryMin: parsedSal.salaryMin,
+              salaryMax: parsedSal.salaryMax,
+              experienceMin: parsedExp.experienceMin,
+              experienceMax: parsedExp.experienceMax,
+              postedDate: new Date(),
+            });
+          }
+        } catch (cardErr) {
+          // Skip broken individual card silently
+        }
+      }
+
+      return jobs;
+    } catch (err: any) {
+      this.logger.error(`Error scraping page: ${err.message}`);
+      return jobs;
+    }
+  }
+
+  // ══════════════════════════════════════════════════
+  // HELPER: Human-like auto-scroll
+  // ══════════════════════════════════════════════════
+  private async autoScroll(page: Page): Promise<void> {
+    await page.evaluate(async () => {
+      await new Promise<void>((resolve) => {
+        let totalHeight = 0;
+        const distance = 350;
+        const timer = setInterval(() => {
+          const scrollHeight = document.body.scrollHeight;
+          window.scrollBy(0, distance);
+          totalHeight += distance;
+
+          if (totalHeight >= scrollHeight - window.innerHeight || totalHeight > 3000) {
+            clearInterval(timer);
+            resolve();
+          }
+        }, 150);
+      });
+    });
+  }
+}

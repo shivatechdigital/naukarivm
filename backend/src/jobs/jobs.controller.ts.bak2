@@ -1,0 +1,53 @@
+import {
+  Controller,
+  Get,
+  Post,
+  Param,
+  Query,
+  Body,
+  UseGuards,
+  Request,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
+import { JobsService } from './jobs.service';
+import { MatchingService } from './matching.service'; // ← IMPORT
+import { FilterJobsDto } from './dto/filter-jobs.dto';
+import { TriggerScrapeDto } from './dto/trigger-scrape.dto';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+
+@Controller('jobs')
+@UseGuards(JwtAuthGuard)
+export class JobsController {
+  constructor(
+    private jobsService: JobsService,
+    private matchingService: MatchingService, // ← INJECT
+  ) {}
+
+  // ─── POST /api/jobs/scrape ───
+  @Post('scrape')
+  @HttpCode(HttpStatus.OK)
+  async triggerScrape(@Request() req: any, @Body() dto: TriggerScrapeDto) {
+    return this.jobsService.scrapeForUser(req.user.userId, dto);
+  }
+
+  // ─── POST /api/jobs/match ───
+  // Calculate match scores for scraped jobs
+  @Post('match')
+  @HttpCode(HttpStatus.OK)
+  async triggerMatching(@Request() req: any) {
+    return this.matchingService.evaluateJobsForUser(req.user.userId);
+  }
+
+  // ─── GET /api/jobs ───
+  @Get()
+  async getJobs(@Request() req: any, @Query() dto: FilterJobsDto) {
+    return this.jobsService.findAll(dto);
+  }
+
+  // ─── GET /api/jobs/:id ───
+  @Get(':id')
+  async getJobById(@Param('id') id: string) {
+    return this.jobsService.findOne(id);
+  }
+}

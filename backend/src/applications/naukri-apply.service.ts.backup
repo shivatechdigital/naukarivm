@@ -1,0 +1,330 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { Page } from 'playwright';
+import { BrowserManager } from '../automation/playwright/browser.manager';
+import { NaukriService } from '../naukri/naukri.service';
+import * as path from 'path';
+import * as fs from 'fs';
+
+export interface ApplyResult {
+  success: boolean;
+  alreadyApplied?: boolean;
+  statusText: 'APPLIED' | 'ALREADY_APPLIED' | 'SKIPPED' | 'FAILED';
+  errorMessage?: string;
+}
+
+@Injectable()
+export class NaukriApplyService {
+  private readonly logger = new Logger(NaukriApplyService.name);
+
+  constructor(
+    private browserManager: BrowserManager,
+    private naukriService: NaukriService,
+  ) {}
+
+  async applyToJob(userId: string, jobUrl: string, jobId: string): Promise<ApplyResult> {
+    this.logger.log(`Starting Smart Auto-Apply for Job ID: ${jobId}`);
+
+    const cookies = await this.naukriService.getDecryptedCookies(userId);
+    if (!cookies || cookies.length === 0) {
+      return {
+        success: false,
+        statusText: 'FAILED',
+        errorMessage: 'Naukri session cookies missing.',
+      };
+    }
+
+    let browser: any = null;
+
+    try {
+      const { browser: b, page } = await this.browserManager.createContext({ cookies });
+      browser = b;
+
+      this.logger.log(`Navigating to job page: ${jobUrl}`);
+      await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(3000);
+
+      // ─── 1. Check if session expired / redirect to login page ───
+      if (page.url().includes('/nlogin/login')) {
+        return {
+          success: false,
+          statusText: 'FAILED',
+          errorMessage: 'Naukri session expire ho gaya. Cookies re-sync karo.',
+        };
+      }
+
+      // ─── 2. Check if Already Applied ───
+      const isAlreadyApplied = await this.checkIfApplied(page);
+      if (isAlreadyApplied) {
+        this.logger.log(`Job ${jobId} is ALREADY APPLIED.`);
+        return { success: true, alreadyApplied: true, statusText: 'ALREADY_APPLIED' };
+      }
+
+      // ─── 3. Find Main Apply Button ───
+      const applySelectors = [
+        'button#apply-button',
+        'button.apply-button',
+        '.apply-button-container button',
+        'button.apply-main',
+        'button:has-text("Apply")',
+        '[class*="apply-button"]',
+      ];
+
+      let applyBtn = null;
+      for (const sel of applySelectors) {
+        const el = page.locator(sel).first();
+        if (await el.isVisible().catch(() => false)) {
+          applyBtn = el;
+          break;
+        }
+      }
+
+      if (!applyBtn) {
+        const screenshotPath = await this.saveDebugScreenshot(page, jobId, 'no-button');
+        this.logger.warn(`Apply button not visible on job ${jobId}. Screenshot saved: ${path.basename(screenshotPath)}`);
+        return {
+          success: false,
+          statusText: 'FAILED',
+          errorMessage: 'Apply button page par nahi mila.',
+        };
+      }
+
+      const btnText = (await applyBtn.innerText().catch(() => '')).trim();
+      this.logger.log(`Found apply button text: "${btnText}"`);
+
+      // ─── 4. Skip external website redirects ───
+      if (
+        btnText.toLowerCase().includes('company site') ||
+        btnText.toLowerCase().includes('website')
+      ) {
+        this.logger.log(`Job ${jobId} requires external redirect. SKIPPED.`);
+        return {
+          success: false,
+          statusText: 'SKIPPED',
+          errorMessage: 'Requires external company website redirect.',
+        };
+      }
+
+      // ─── 5. Click Main Apply Button ───
+      this.logger.log('Clicking Apply button...');
+      await applyBtn.click({ force: true, timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(3000);
+
+      // ─── 6. Handle All Naukri Popups & Chatbot Drawers ───
+      await this.handleNaukriPopupsAndChatbot(page);
+
+      // ─── 7. Verify Success Confirmation ───
+      this.logger.log('🔍 Verifying application submission...');
+
+      // Give Naukri time to render the final confirmation state.
+      await page.waitForTimeout(1500);
+
+      // Naukri may show:
+      // "Applied to "DevOps Engineer""
+      // or "Already Applied"
+      await page
+        .waitForFunction(
+          () => {
+            const text = document.body?.innerText || '';
+
+            return (
+              /applied\s+to\s+["'][^"']+["']/i.test(text) ||
+              /already\s+applied/i.test(text)
+            );
+          },
+          { timeout: 8000 }
+        )
+        .catch(() => {});
+
+      const bodyText = await page
+        .locator('body')
+        .innerText()
+        .catch(() => '');
+
+      const appliedTextDetected =
+        /applied\s+to\s+["'][^"']+["']/i.test(bodyText);
+
+      const alreadyAppliedDetected =
+        /already\s+applied/i.test(bodyText);
+
+      if (appliedTextDetected) {
+        this.logger.log(
+          `✅ Application successfully verified on Naukri for Job ${jobId}`,
+        );
+
+        return {
+          success: true,
+          statusText: 'APPLIED',
+        };
+      }
+
+      if (alreadyAppliedDetected) {
+        this.logger.log(
+          `ℹ️ Job ${jobId} was already applied on Naukri`,
+        );
+
+        return {
+          success: true,
+          alreadyApplied: true,
+          statusText: 'ALREADY_APPLIED',
+        };
+      }
+
+      // Fallback: Apply button may change to "Applied".
+      const updatedBtnText = (
+        await applyBtn.innerText().catch(() => '')
+      ).trim();
+
+      if (updatedBtnText.toLowerCase().includes('applied')) {
+        this.logger.log(
+          `✅ Job ${jobId} verified via Apply button text`,
+        );
+
+        return {
+          success: true,
+          statusText: 'APPLIED',
+        };
+      }
+
+      // Save screenshot for debugging if unverified.
+      const screenshotPath = await this.saveDebugScreenshot(
+        page,
+        jobId,
+        'apply-unverified',
+      );
+
+      this.logger.warn(
+        `⚠️ Application action completed but success could not be verified for Job ${jobId}. Screenshot saved: ${path.basename(screenshotPath)}`,
+      );
+
+      return {
+        success: false,
+        statusText: 'FAILED',
+        errorMessage:
+          `Application submission could not be verified. Screenshot saved.`,
+      };
+    } catch (err: any) {
+      this.logger.error(`Exception during apply for job ${jobId}: ${err.message}`);
+      return {
+        success: false,
+        statusText: 'FAILED',
+        errorMessage: err.message,
+      };
+    } finally {
+      if (browser) {
+        await this.browserManager.close(browser);
+      }
+    }
+  }
+
+  // Helper to check if applied badge/status is visible
+  private async checkIfApplied(page: Page): Promise<boolean> {
+    const appliedSelectors = [
+      'button:has-text("Applied")',
+      'span:has-text("Applied")',
+      'div:has-text("successfully applied")',
+      'div:has-text("Application sent")',
+      'span:has-text("You have applied")',
+      'div:has-text("applied for this job")',
+      '.already-applied',
+      '[class*="already-applied"]',
+      '[class*="applied-message"]',
+    ];
+
+    for (const sel of appliedSelectors) {
+      if (await page.locator(sel).first().isVisible().catch(() => false)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  // ══════════════════════════════════════════════════
+  // HELPER: Handle Resume Update, Questionnaire & Chatbot Popups
+  // ══════════════════════════════════════════════════
+  private async handleNaukriPopupsAndChatbot(page: Page) {
+    try {
+      for (let step = 0; step < 4; step++) {
+        if (await this.checkIfApplied(page)) break;
+
+        // Popup 1: "Apply without updating resume" / "Continue to apply"
+        const continueBtn = page
+          .locator(
+            'button:has-text("Apply without updating"), button:has-text("Continue to apply"), button:has-text("Skip & Apply"), button:has-text("Skip")',
+          )
+          .first();
+
+        if (await continueBtn.isVisible().catch(() => false)) {
+          this.logger.log('Popup detected: "Apply without updating resume". Clicking...');
+          await continueBtn.click({ force: true, timeout: 3000 }).catch(() => {});
+          await page.waitForTimeout(2000);
+          continue;
+        }
+
+        // Popup 2: Questionnaire / Chatbot Drawer
+        const drawerSelectors = ['.chatbot_Drawer', '[class*="drawer"]', '.custom-questions-modal', '[class*="chatbot"]'];
+        let drawer = null;
+        for (const sel of drawerSelectors) {
+          const el = page.locator(sel).first();
+          if (await el.isVisible().catch(() => false)) {
+            drawer = el;
+            break;
+          }
+        }
+
+        if (drawer) {
+          this.logger.log(`Questionnaire drawer step ${step + 1} detected. Answering questions...`);
+
+          // A. Click radio button / option chips
+          const options = drawer.locator('input[type="radio"], label, .option, .chip, li[class*="option"]').first();
+          if (await options.isVisible().catch(() => false)) {
+            await options.click({ force: true, timeout: 3000 }).catch(() => {});
+            await page.waitForTimeout(1000);
+          }
+
+          // B. Fill empty text / number inputs
+          const textInputs = drawer.locator('input[type="text"], input[type="number"], textarea');
+          const inputCount = await textInputs.count().catch(() => 0);
+          for (let i = 0; i < inputCount; i++) {
+            const input = textInputs.nth(i);
+            const val = await input.inputValue().catch(() => '');
+            if (!val) {
+              await input.fill('15', { timeout: 3000 }).catch(() => {});
+            }
+          }
+
+          // C. Click Submit / Save & Apply / Next
+          const submitBtn = drawer
+            .locator('button:has-text("Save & Apply"), button:has-text("Submit"), button:has-text("Next"), button:has-text("Continue"), button:has-text("Apply")')
+            .first();
+
+          if (await submitBtn.isVisible().catch(() => false)) {
+            this.logger.log('Clicking drawer submit button...');
+            await submitBtn.click({ force: true, timeout: 3000 }).catch(() => {});
+            await page.waitForTimeout(2500);
+            continue;
+          }
+        }
+
+        break;
+      }
+    } catch (e: any) {
+      this.logger.warn(`Popup handling notice: ${e.message}`);
+    }
+  }
+
+  // Debug Screenshot Helper
+  private async saveDebugScreenshot(page: Page, jobId: string, prefix: string): Promise<string> {
+    try {
+      const dir = path.join(process.cwd(), 'uploads', 'debug');
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+      const filename = `${prefix}-${jobId}-${Date.now()}.png`;
+      const filepath = path.join(dir, filename);
+      await page.screenshot({ path: filepath, fullPage: false });
+      return filepath;
+    } catch {
+      return '';
+    }
+  }
+}

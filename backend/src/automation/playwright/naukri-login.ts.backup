@@ -1,0 +1,281 @@
+import { Logger } from '@nestjs/common';
+import { Page, BrowserContext, Cookie } from 'playwright';
+import * as path from 'path';
+
+const logger = new Logger('NaukriLogin');
+
+export interface NaukriLoginResult {
+  success: boolean;
+  cookies?: Cookie[];
+  error?: string;
+  needsOTP?: boolean;
+  needsCaptcha?: boolean;
+  userName?: string;
+}
+
+export async function performNaukriLogin(
+  page: Page,
+  context: BrowserContext,
+  email: string,
+  password: string,
+): Promise<NaukriLoginResult> {
+  try {
+    logger.log(`Navigating to Naukri login page for: ${email}`);
+
+    // Direct login page
+    await page.goto('https://www.naukri.com/nlogin/login', {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000,
+    });
+
+    // Wait 3 seconds for client-side JS to render
+    await page.waitForTimeout(3000);
+
+    // Check if Cloudflare / Akamai Block page hit
+    const pageTitle = await page.title();
+    const pageContent = await page.content();
+
+    if (
+      pageTitle.includes('Access Denied') ||
+      pageTitle.includes('Attention Required') ||
+      pageContent.includes('challenge-running') ||
+      pageContent.includes('Incapsula')
+    ) {
+      const screenshotPath = path.join(process.cwd(), 'debug-blocked.png');
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+      logger.error(`Naukri WAF block detected! Saved screenshot to ${screenshotPath}`);
+      return {
+        success: false,
+        error: 'Naukri ne Azure Cloud IP ko block kar diya. Cookie method use karein.',
+      };
+    }
+
+    // ─── Step 1: Find Username field with multiple selectors ───
+    const usernameSelectors = [
+      'input#usernameField',
+      'input[placeholder*="Email" i]',
+      'input[placeholder*="Username" i]',
+      'input[type="text"]',
+      'input[type="email"]',
+    ];
+
+    let emailField = null;
+    for (const sel of usernameSelectors) {
+      const el = page.locator(sel).first();
+      if (await el.isVisible().catch(() => false)) {
+        emailField = el;
+        logger.log(`Found username input using selector: ${sel}`);
+        break;
+      }
+    }
+
+    if (!emailField) {
+      // Screenshot for debugging
+      const screenshotPath = path.join(process.cwd(), 'debug-login-failed.png');
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+      logger.error(`Username field nahi mila. Screenshot saved: ${screenshotPath}`);
+
+      return {
+        success: false,
+        error: 'Naukri login page form load nahi hua. Check debug-login-failed.png',
+      };
+    }
+
+    // Fill Email with human typing speed
+    await emailField.click();
+    await page.waitForTimeout(300);
+    await emailField.fill('');
+    await emailField.pressSequentially(email, { delay: 60 });
+    logger.log('Email filled');
+
+    // ─── Step 2: Find Password Field ───
+    const passwordSelectors = [
+      'input#passwordField',
+      'input[type="password"]',
+      'input[placeholder*="password" i]',
+    ];
+
+    let passField = null;
+    for (const sel of passwordSelectors) {
+      const el = page.locator(sel).first();
+      if (await el.isVisible().catch(() => false)) {
+        passField = el;
+        break;
+      }
+    }
+
+    if (!passField) {
+      return { success: false, error: 'Password field nahi mila' };
+    }
+
+    await passField.click();
+    await page.waitForTimeout(300);
+    await passField.fill('');
+    await passField.pressSequentially(password, { delay: 60 });
+    logger.log('Password filled');
+
+    // ─── Step 3: Click Login Button ───
+    const buttonSelectors = [
+      'button[data-type="loginSubmit"]',
+      'button:has-text("Login")',
+      'button[type="submit"]',
+      '.btn-primary',
+    ];
+
+    let submitBtn = null;
+    for (const sel of buttonSelectors) {
+      const el = page.locator(sel).first();
+      if (await el.isVisible().catch(() => false)) {
+        submitBtn = el;
+        break;
+      }
+    }
+
+    if (submitBtn) {
+      await submitBtn.click();
+    } else {
+      await passField.press('Enter');
+    }
+    logger.log('Login submitted. Waiting for response...');
+
+    // Wait for Naukri to complete the normal login flow.
+    await page.waitForTimeout(6000);
+
+    const currentUrl = page.url();
+    const pageTitle = await page.title().catch(() => '');
+
+    logger.log(`Login response URL: ${currentUrl}`);
+    logger.log(`Login response title: ${pageTitle}`);
+
+    // Check visible login/server errors.
+    const errorSelectors = [
+      '.errormsg',
+      '.error-msg',
+      '.server-err',
+      '[class*="server-error"]',
+      '[class*="error"]',
+    ];
+
+    let errorMsg: string | null = null;
+
+    for (const selector of errorSelectors) {
+      const text = await page
+        .locator(selector)
+        .first()
+        .textContent()
+        .catch(() => null);
+
+      if (text && text.trim().length > 0) {
+        errorMsg = text.trim();
+        break;
+      }
+    }
+
+    if (errorMsg) {
+      logger.warn(`❌ Naukri login error detected: ${errorMsg}`);
+
+      const debugPath = path.join(
+        process.cwd(),
+        'debug-login-error.png',
+      );
+
+      await page.screenshot({
+        path: debugPath,
+        fullPage: true,
+      });
+
+      return {
+        success: false,
+        error: `Naukri error: ${errorMsg}`,
+      };
+    }
+
+    // Check if OTP is requested.
+    const isOtp = await page
+      .locator(
+        '#otpField, input[name="otp"], input[autocomplete="one-time-code"], .otp-container',
+      )
+      .first()
+      .isVisible()
+      .catch(() => false);
+
+    if (isOtp) {
+      logger.warn('⚠️ Naukri requested OTP.');
+
+      return {
+        success: false,
+        needsOTP: true,
+        error: 'Naukri ne OTP maang liya hai. Phone check karo.',
+      };
+    }
+
+    // Check whether Naukri actually left the login page.
+    const stillOnLoginPage =
+      currentUrl.includes('/nlogin/login');
+
+    if (stillOnLoginPage) {
+      logger.warn(
+        `❌ Naukri login did not complete. Still on login page: ${currentUrl}`,
+      );
+
+      const debugPath = path.join(
+        process.cwd(),
+        'debug-login-not-completed.png',
+      );
+
+      await page.screenshot({
+        path: debugPath,
+        fullPage: true,
+      });
+
+      return {
+        success: false,
+        error:
+          `Naukri login did not complete. Current URL: ${currentUrl}`,
+      };
+    }
+
+    // Only now inspect cookies. Cookie presence alone is not treated
+    // as proof of authentication.
+    const cookies = await context.cookies();
+
+    logger.log(
+      `Naukri login left login page. Cookie count: ${cookies.length}`,
+    );
+
+    logger.log('✅ Naukri Login Successfully verified!');
+
+    return {
+      success: true,
+      cookies,
+      userName: email,
+    };
+  } catch (err: any) {
+    logger.error(`Login error: ${err.message}`);
+    return {
+      success: false,
+      error: err.message,
+    };
+  }
+}
+
+export async function verifyNaukriSession(
+  page: Page,
+  context: BrowserContext,
+): Promise<{ valid: boolean; userName?: string }> {
+  try {
+    await page.goto('https://www.naukri.com/mnjuser/homepage', {
+      waitUntil: 'domcontentloaded',
+      timeout: 20000,
+    });
+    await page.waitForTimeout(3000);
+
+    const currentUrl = page.url();
+    if (currentUrl.includes('/nlogin/login')) {
+      return { valid: false };
+    }
+    return { valid: true };
+  } catch {
+    return { valid: false };
+  }
+}

@@ -1,0 +1,262 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { NaukriService } from '../naukri/naukri.service';
+import { BrowserManager } from '../automation/playwright/browser.manager';
+import {
+  parseSalary,
+  parseExperience,
+} from './utils/naukri-parser.util';
+
+export interface ScrapedJobItem {
+  naukriJobId: string;
+  title: string;
+  company: string;
+  companyRating?: number;
+  companyReviews?: number;
+  location: string;
+  experience: string;
+  experienceMin?: number;
+  experienceMax?: number;
+  salary: string;
+  salaryMin?: number;
+  salaryMax?: number;
+  description: string;
+  skills: string[];
+  url: string;
+  isEasyApply: boolean;
+  postedDate?: Date;
+}
+
+@Injectable()
+export class NaukriScraperService {
+  private readonly logger = new Logger(NaukriScraperService.name);
+
+  constructor(
+    private naukriService: NaukriService,
+    private browserManager: BrowserManager,
+  ) {}
+
+  async scrapeByQuery(
+    userId: string,
+    keyword: string = 'devops',
+    location: string = '',
+    experience?: number,
+    pagesToScrape: number = 1,
+  ): Promise<ScrapedJobItem[]> {
+    const cleanKeyword = keyword.trim() || 'devops';
+    this.logger.log(`Starting simple search for Keyword: "${cleanKeyword}"`);
+
+    const cookies = await this.naukriService.getDecryptedCookies(userId);
+    let browser: any = null;
+    const allJobs: ScrapedJobItem[] = [];
+
+    try {
+      const { browser: b, page } = await this.browserManager.createContext({
+        cookies: cookies || undefined,
+      });
+      browser = b;
+
+      // 1. Visit homepage to setup Akamai cookies
+      this.logger.log('Warming up session on Naukri...');
+      await page.goto('https://www.naukri.com/', {
+        waitUntil: 'domcontentloaded',
+        timeout: 25000,
+      }).catch(() => {});
+
+      await page.waitForTimeout(2000);
+
+      // 2. Build simple search URL
+      const kwFormatted = cleanKeyword.toLowerCase().replace(/\s+/g, '-');
+      let searchUrl = `https://www.naukri.com/${kwFormatted}-jobs?k=${encodeURIComponent(cleanKeyword)}`;
+
+      if (location && location.trim().length > 0) {
+        const locFormatted = location.toLowerCase().trim().replace(/\s+/g, '-');
+        searchUrl = `https://www.naukri.com/${kwFormatted}-jobs-in-${locFormatted}?k=${encodeURIComponent(cleanKeyword)}&l=${encodeURIComponent(location)}`;
+      }
+
+      for (let pageNo = 1; pageNo <= pagesToScrape; pageNo++) {
+        let capturedJson: any = null;
+
+        const currentUrl = pageNo === 1 ? searchUrl : `${searchUrl}&pageNo=${pageNo}`;
+
+        const onResponse = async (response: any) => {
+          const url = response.url();
+          if (url.includes('/jobapi/v3/search') && response.status() === 200) {
+            try {
+              capturedJson = await response.json();
+            } catch {}
+          }
+        };
+
+        page.on('response', onResponse);
+
+        this.logger.log(`Opening URL: ${currentUrl}`);
+        await page.goto(currentUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30000,
+        }).catch((e) => this.logger.warn(`Goto notice: ${e.message}`));
+
+        // Wait for network response
+        await page.waitForTimeout(4000);
+        page.off('response', onResponse);
+
+        if (capturedJson && Array.isArray(capturedJson.jobDetails) && capturedJson.jobDetails.length > 0) {
+          this.logger.log(`✅ Success! Extracted ${capturedJson.jobDetails.length} "${cleanKeyword}" jobs from page ${pageNo}`);
+          const apiJobs = this.parseNaukriApiJson(capturedJson.jobDetails);
+          allJobs.push(...apiJobs);
+        } else {
+          this.logger.warn('API JSON not caught via listener. Triggering in-page fetch...');
+          const fetchJson = await page.evaluate(
+            async ({ kw, pageNum }) => {
+              try {
+                const params = new URLSearchParams({
+                  noOfResults: '20',
+                  urlType: 'search',
+                  searchType: 'cloud',
+                  keyword: kw,
+                  pageNo: String(pageNum),
+                  seoKey: `${kw.toLowerCase().replace(/\s+/g, '-')}-jobs`,
+                });
+
+                const res = await fetch(`https://www.naukri.com/jobapi/v3/search?${params.toString()}`, {
+                  headers: { appid: '109', systemid: 'NCI', clientid: 'd341acb5-8271-432d-9442-998f498687a4' },
+                });
+                if (res.ok) return await res.json();
+                return null;
+              } catch {
+                return null;
+              }
+            },
+            { kw: cleanKeyword, pageNum: pageNo },
+          );
+
+          if (fetchJson && Array.isArray(fetchJson.jobDetails) && fetchJson.jobDetails.length > 0) {
+            this.logger.log(`✅ In-page fetch succeeded! Found ${fetchJson.jobDetails.length} jobs`);
+            const apiJobs = this.parseNaukriApiJson(fetchJson.jobDetails);
+            allJobs.push(...apiJobs);
+          } else {
+            this.logger.warn('DOM extraction fallback triggered...');
+            const domJobs = await this.extractJobsFromDom(page);
+            this.logger.log(`DOM extraction found ${domJobs.length} jobs`);
+            allJobs.push(...domJobs);
+          }
+        }
+      }
+
+      return allJobs;
+    } catch (err: any) {
+      this.logger.error(`Scrape failed for "${cleanKeyword}": ${err.message}`);
+      return allJobs;
+    } finally {
+      if (browser) {
+        await this.browserManager.close(browser);
+      }
+    }
+  }
+
+  private parseNaukriApiJson(jobDetails: any[]): ScrapedJobItem[] {
+    const scrapedItems: ScrapedJobItem[] = [];
+
+    for (const job of jobDetails) {
+      try {
+        const jobId = String(job.jobId || '');
+        const title = job.title || '';
+        const company = job.companyName || 'Unknown Company';
+        const rating = job.rating ? parseFloat(job.rating) : undefined;
+        const reviews = job.reviewsCount ? parseInt(job.reviewsCount, 10) : undefined;
+
+        let expText = '0-5 Yrs';
+        let salaryText = 'Not Disclosed';
+        let locationText = 'India';
+
+        if (Array.isArray(job.placeholders)) {
+          for (const p of job.placeholders) {
+            if (p.type === 'experience') expText = p.label || expText;
+            if (p.type === 'salary') salaryText = p.label || salaryText;
+            if (p.type === 'location') locationText = p.label || locationText;
+          }
+        }
+
+        const description = job.jobDescription || job.snippet || '';
+
+        const skills: string[] = [];
+        if (Array.isArray(job.tagsAndSkills)) {
+          skills.push(...job.tagsAndSkills);
+        } else if (typeof job.tagsAndSkills === 'string') {
+          skills.push(...job.tagsAndSkills.split(',').map((s: string) => s.trim()));
+        }
+
+        const jobUrl = job.jdURL
+          ? `https://www.naukri.com${job.jdURL}`
+          : job.staticUrl
+          ? `https://www.naukri.com/${job.staticUrl}`
+          : `https://www.naukri.com/job-listings-${jobId}`;
+
+        const parsedSal = parseSalary(salaryText);
+        const parsedExp = parseExperience(expText);
+
+        scrapedItems.push({
+          naukriJobId: jobId,
+          title,
+          company,
+          companyRating: rating,
+          companyReviews: reviews,
+          location: locationText,
+          experience: expText,
+          experienceMin: parsedExp.experienceMin,
+          experienceMax: parsedExp.experienceMax,
+          salary: salaryText,
+          salaryMin: parsedSal.salaryMin,
+          salaryMax: parsedSal.salaryMax,
+          description,
+          skills,
+          url: jobUrl,
+          isEasyApply: job.applyType !== 'external',
+          postedDate: new Date(),
+        });
+      } catch {}
+    }
+
+    return scrapedItems;
+  }
+
+  private async extractJobsFromDom(page: any): Promise<ScrapedJobItem[]> {
+    try {
+      const jobs = await page.$$eval('.srp-jobtuple-wrapper, .cust-job-tuple, [data-job-id]', (elements: any[]) => {
+        return elements.map((element: any) => {
+          const el = element as HTMLElement;
+          const titleEl = el.querySelector('a.title, a.job-title') as HTMLAnchorElement;
+          const compEl = el.querySelector('a.comp-name, .company-name') as HTMLElement;
+          const expEl = el.querySelector('.expwdth, [class*="exp"]') as HTMLElement;
+          const salEl = el.querySelector('.sal-wrap, [class*="sal"]') as HTMLElement;
+          const locEl = el.querySelector('.locWdth, [class*="loc"]') as HTMLElement;
+
+          return {
+            naukriJobId: el.getAttribute('data-job-id') || '',
+            title: titleEl?.innerText?.trim() || '',
+            company: compEl?.innerText?.trim() || 'Unknown',
+            location: locEl?.innerText?.trim() || 'India',
+            experience: expEl?.innerText?.trim() || '0-5 Yrs',
+            salary: salEl?.innerText?.trim() || 'Not Disclosed',
+            description: '',
+            skills: [],
+            url: titleEl?.href || '',
+            isEasyApply: !el.innerText.includes('Company Site'),
+          };
+        });
+      });
+
+      return jobs
+        .filter((j: any) => j.title && (j.url || j.naukriJobId))
+        .map((j: any) => ({
+          ...j,
+          salaryMin: parseSalary(j.salary).salaryMin,
+          salaryMax: parseSalary(j.salary).salaryMax,
+          experienceMin: parseExperience(j.experience).experienceMin,
+          experienceMax: parseExperience(j.experience).experienceMax,
+          postedDate: new Date(),
+        }));
+    } catch {
+      return [];
+    }
+  }
+}

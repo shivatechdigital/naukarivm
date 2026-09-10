@@ -1,0 +1,75 @@
+import {
+  Controller,
+  Get,
+  Post,
+  Query,
+  Param,
+  UseGuards,
+  Request,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
+import { ApplicationsService } from './applications.service';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+
+@Controller('applications')
+@UseGuards(JwtAuthGuard)
+export class ApplicationsController {
+  constructor(private applicationsService: ApplicationsService) {}
+
+  // ─── POST /api/applications/apply ───
+  // Trigger Auto-Apply engine on pending matched jobs
+  @Post('apply')
+  @HttpCode(HttpStatus.OK)
+  async triggerAutoApply(
+    @Request() req: any,
+    @Query('limit') limit?: string,
+  ) {
+    const limitCount = limit ? parseInt(limit, 10) : 5;
+    return this.applicationsService.processPendingApplications(req.user.userId, limitCount);
+  }
+
+  // ─── POST /api/applications/apply/:jobId ───
+  // Apply to one selected job
+  @Post('apply/:jobId')
+  @HttpCode(HttpStatus.OK)
+  async applySingleJob(
+    @Request() req: any,
+    @Param('jobId') jobId: string,
+  ) {
+    return this.applicationsService.applySingleJob(
+      req.user.userId,
+      jobId,
+    );
+  }
+
+  // ─── GET /api/applications ───
+  // List user applications and history
+  @Post('apply/:jobId')
+  @HttpCode(HttpStatus.OK)
+  async applyToSingleJob(
+    @Request() req: any,
+    @Param('jobId') jobId: string,
+  ) {
+    return this.applicationsService.applySingleJob(
+      req.user.userId,
+      jobId,
+    );
+  }
+
+  @Get('stats')
+  async getStats(@Request() req: any) {
+    return this.applicationsService.getDashboardStats(req.user.userId);
+  }
+
+  @Get()
+  async getApplications(
+    @Request() req: any,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const p = page ? parseInt(page, 10) : 1;
+    const l = limit ? parseInt(limit, 10) : 20;
+    return this.applicationsService.getUserApplications(req.user.userId, p, l);
+  }
+}

@@ -1,0 +1,212 @@
+import { Logger } from '@nestjs/common';
+import { Page, BrowserContext, Cookie } from 'playwright';
+
+const logger = new Logger('NaukriLogin');
+
+export interface NaukriLoginResult {
+  success: boolean;
+  cookies?: Cookie[];
+  error?: string;
+  needsOTP?: boolean;
+  needsCaptcha?: boolean;
+  userName?: string;
+}
+
+// ═══════════════════════════════════════════
+// NAUKRI LOGIN FUNCTION
+// ═══════════════════════════════════════════
+export async function performNaukriLogin(
+  page: Page,
+  context: BrowserContext,
+  email: string,
+  password: string,
+): Promise<NaukriLoginResult> {
+  try {
+    logger.log(`Attempting Naukri login for: ${email}`);
+
+    // ─── Step 1: Naukri login page pe jao ───
+    await page.goto('https://www.naukri.com/nlogin/login', {
+      waitUntil: 'networkidle',
+      timeout: 30000,
+    });
+
+    // Wait for form to load
+    await page.waitForSelector('#login_Layer', { timeout: 10000 }).catch(() => {
+      // Sometimes the selector is different
+    });
+
+    // ─── Step 2: Email fill karo ───
+    const emailInput = page.locator('input#usernameField');
+    await emailInput.waitFor({ timeout: 10000 });
+    await emailInput.click();
+    await emailInput.fill(email);
+    logger.log('Email filled');
+
+    // ─── Step 3: Password fill karo ───
+    const passwordInput = page.locator('input#passwordField');
+    await passwordInput.waitFor({ timeout: 5000 });
+    await passwordInput.click();
+    await passwordInput.fill(password);
+    logger.log('Password filled');
+
+    // ─── Step 4: Login button click ───
+    const loginButton = page.locator('button[data-type="loginSubmit"]');
+    await loginButton.waitFor({ timeout: 5000 });
+    await loginButton.click();
+    logger.log('Login button clicked');
+
+    // ─── Step 5: Wait for result ───
+    // 10 second wait karo — ya toh dashboard load hoga ya error
+    await page.waitForTimeout(5000);
+
+    // ─── Step 6: Check kya hua ───
+
+    // Case A: CAPTCHA aa gaya
+    const captchaElement = await page
+      .locator('.g-recaptcha, #captcha-container, .captcha-container')
+      .isVisible()
+      .catch(() => false);
+
+    if (captchaElement) {
+      logger.warn('CAPTCHA detected!');
+      return {
+        success: false,
+        needsCaptcha: true,
+        error: 'Naukri ne CAPTCHA dikha diya. Kuch der baad try karo.',
+      };
+    }
+
+    // Case B: OTP aa gaya
+    const otpElement = await page
+      .locator('#otpField, .otp-input, input[name="otp"]')
+      .isVisible()
+      .catch(() => false);
+
+    if (otpElement) {
+      logger.warn('OTP required!');
+      return {
+        success: false,
+        needsOTP: true,
+        error: 'Naukri ko OTP chahiye. Apne phone pe OTP check karo.',
+      };
+    }
+
+    // Case C: Login error (wrong password etc.)
+    const errorMessage = await page
+      .locator('.errormsg, .error-msg, [class*="error"]')
+      .first()
+      .textContent()
+      .catch(() => null);
+
+    if (errorMessage && errorMessage.trim().length > 0) {
+      logger.warn(`Login error: ${errorMessage}`);
+      return {
+        success: false,
+        error: `Login fail: ${errorMessage.trim()}`,
+      };
+    }
+
+    // Case D: Check if we're on dashboard (successful login)
+    const currentUrl = page.url();
+    const isLoggedIn =
+      currentUrl.includes('/mnjuser/homepage') ||
+      currentUrl.includes('/mnjuser/dashboard') ||
+      currentUrl.includes('/myNaukri') ||
+      currentUrl.includes('naukri.com/mnjuser');
+
+    if (isLoggedIn) {
+      logger.log('Login successful! Extracting cookies...');
+
+      // Cookies extract karo
+      const cookies = await context.cookies();
+
+      // User name try to extract
+      const userName = await page
+        .locator('.nI-gNb-drawer__user-name, .user-name, [class*="userName"]')
+        .first()
+        .textContent()
+        .catch(() => email);
+
+      return {
+        success: true,
+        cookies,
+        userName: userName?.trim() || email,
+      };
+    }
+
+    // Case E: URL changed but not dashboard — might still be success
+    if (currentUrl !== 'https://www.naukri.com/nlogin/login') {
+      // Check cookies — agar Naukri ke session cookies hain toh success
+      const cookies = await context.cookies();
+      const hasSessionCookie = cookies.some(
+        (c) =>
+          c.name.includes('Naukri') ||
+          c.name.includes('njuser') ||
+          c.name.includes('sid') ||
+          c.name.includes('PHPSESSID'),
+      );
+
+      if (hasSessionCookie) {
+        logger.log('Login successful (detected via cookies)!');
+        return {
+          success: true,
+          cookies,
+          userName: email,
+        };
+      }
+    }
+
+    // Case F: Kuch samajh nahi aaya
+    logger.warn('Login status unclear');
+    return {
+      success: false,
+      error: 'Login status confirm nahi ho paya. Dobara try karo.',
+    };
+  } catch (err: any) {
+    logger.error(`Login failed with error: ${err.message}`);
+    return {
+      success: false,
+      error: `Technical error: ${err.message}`,
+    };
+  }
+}
+
+// ═══════════════════════════════════════════
+// SESSION VERIFY — Kya saved session valid hai?
+// ═══════════════════════════════════════════
+export async function verifyNaukriSession(
+  page: Page,
+  context: BrowserContext,
+): Promise<{ valid: boolean; userName?: string }> {
+  try {
+    // Dashboard pe jao cookies ke saath
+    await page.goto('https://www.naukri.com/mnjuser/homepage', {
+      waitUntil: 'networkidle',
+      timeout: 20000,
+    });
+
+    await page.waitForTimeout(3000);
+
+    const currentUrl = page.url();
+
+    // Agar login page pe redirect hua = session expired
+    if (currentUrl.includes('/nlogin/login')) {
+      return { valid: false };
+    }
+
+    // Dashboard pe hai = valid
+    if (currentUrl.includes('/mnjuser/')) {
+      const userName = await page
+        .locator('.nI-gNb-drawer__user-name, .user-name')
+        .first()
+        .textContent()
+        .catch(() => undefined);
+
+      return { valid: true, userName: userName?.trim() };
+    }
+
+    return { valid: false };
+  } catch {
+    return { valid: false };
+  }
+}

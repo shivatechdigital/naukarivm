@@ -1,0 +1,215 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  name         String
+  passwordHash String   @map("password_hash")
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  profile       Profile?
+  preferences   JobPreference?
+  jobs          Job[]
+  applications  Application[]
+  naukriSession NaukriSession?
+  AutomationLog AutomationLog[]
+
+  @@map("users")
+}
+
+model Profile {
+  id     String @id @default(uuid())
+  userId String @unique
+
+  phone       String?
+  dateOfBirth DateTime?
+  gender      String?
+
+  currentCompany String?
+  currentTitle   String?
+
+  experience      Float?
+  experienceYears Float?
+
+  currentCtc  Float?
+  expectedCtc Float?
+
+  noticePeriod String?
+
+  skills String[] @default([])
+
+  education      Json?
+  certifications String[] @default([])
+
+  location        String?
+  currentCity     String?
+  preferredCities String[] @default([])
+
+  willingToRelocate Boolean @default(false)
+
+  resumeUrl  String?
+  resumeText String?
+
+  naukriProfileUrl String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("profiles")
+}
+
+model JobPreference {
+  id     String @id @default(uuid())
+  userId String @unique
+
+  jobTitles String[] @default([])
+  keywords  String[] @default([])
+  locations String[] @default([])
+
+  experienceMin Float?
+  experienceMax Float?
+
+  salaryMin Float?
+  salaryMax Float?
+
+  jobTypes     String[] @default([])
+  industries   String[] @default([])
+  companySizes String[] @default([])
+
+  excludedCompanies String[] @default([])
+  excludedKeywords  String[] @default([])
+  blacklistJobIds   String[] @default([])
+
+  isActive Boolean @default(true)
+
+  maxApplicationsPerDay Int   @default(20)
+  matchScoreThreshold   Float @default(60)
+
+  cronExpression String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("job_preferences")
+}
+
+model Job {
+  id            String  @id @default(uuid())
+  source        String  @default("naukri")
+  externalJobId String?
+  naukriJobId   String? @unique
+
+  title          String
+  company        String?
+  companyRating  Float?
+  companyReviews Int?
+
+  location      String?
+  experience    String?
+  experienceMin Float?
+  experienceMax Float?
+
+  salary    String?
+  salaryMin Float?
+  salaryMax Float?
+
+  description String?
+  skills      String[] @default([])
+
+  url         String? @unique
+  isEasyApply Boolean @default(false)
+
+  postedDate DateTime?
+  scrapedAt  DateTime  @default(now())
+  isExpired  Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  applications Application[]
+
+  @@index([source])
+  @@index([title])
+  @@index([scrapedAt])
+  @@index([isExpired])
+  @@map("jobs")
+}
+
+model Application {
+  id           String    @id @default(uuid())
+  userId       String
+  jobId        String
+  status       String    @default("PENDING")
+  matchScore   Float?
+  matchReasons String[] @default([])
+  appliedAt    DateTime?
+  errorMessage String?
+  errorScreenshot String?
+  createdAt    DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  job  Job  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, jobId])
+  @@map("applications")
+}
+
+model NaukriSession {
+  id     String @id @default(uuid())
+  userId String @unique
+
+  encryptedCookies String
+  encryptionIV     String
+
+  naukriEmail String
+  isValid     Boolean @default(false)
+
+  lastVerifiedAt DateTime?
+  expiresAt      DateTime?
+  userAgent      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("naukri_sessions")
+}
+
+model AutomationLog {
+  id     String @id @default(uuid())
+  userId String
+
+  action  String
+  message String?
+
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  jobsFound   Int?
+  jobsMatched Int?
+  jobsFailed  Int?
+  durationMs  Int?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([action])
+  @@index([startedAt])
+  @@map("automation_logs")
+}
