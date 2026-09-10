@@ -155,7 +155,7 @@ export function parsePostedDate(value: unknown): Date | undefined {
     return new Date(now.getTime() - Number(days[1]) * 24 * 60 * 60 * 1000);
   }
 
-  const weeks = lower.match(/(\d+)\s*weeks?\s*ago/i);
+  const weeks = lower.match(/(\d+)\+?\s*weeks?\s*ago/i);
   if (weeks) {
     return new Date(now.getTime() - Number(weeks[1]) * 7 * 24 * 60 * 60 * 1000);
   }
