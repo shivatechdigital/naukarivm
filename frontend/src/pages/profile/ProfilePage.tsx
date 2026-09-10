@@ -100,7 +100,6 @@ export default function ProfilePage() {
     setError('')
 
     const payload = {
-      ...profile,
       currentCtc:
         profile.currentCtc === undefined
           ? undefined
@@ -123,6 +122,11 @@ export default function ProfilePage() {
         .filter(Boolean),
       resumeUrl: profile.resumeUrl?.trim() || undefined,
       naukriProfileUrl: profile.naukriProfileUrl?.trim() || undefined,
+      phone: profile.phone?.trim() || undefined,
+      currentCompany: profile.currentCompany?.trim() || undefined,
+      currentTitle: profile.currentTitle?.trim() || undefined,
+      noticePeriod: profile.noticePeriod?.trim() || undefined,
+      currentCity: profile.currentCity?.trim() || undefined,
     }
 
     try {

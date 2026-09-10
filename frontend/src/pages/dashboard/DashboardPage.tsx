@@ -28,7 +28,7 @@ export default function DashboardPage() {
     fetchNaukriStatus();
     fetchDashboardStats();
     API.get('/preferences/me')
-      .then(({ data }) => setPreferences(data?.preferences || data))
+      .then(({ data }) => setPreferences(data?.preference || data?.preferences || data))
       .catch(() => {});
   }, []);
 
