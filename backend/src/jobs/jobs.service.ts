@@ -249,6 +249,10 @@ export class JobsService {
       });
     }
 
+    if (dto?.isEasyApply !== undefined) {
+      where.isEasyApply = dto.isEasyApply;
+    }
+
     if (search) {
       where.OR = [
         { title: { contains: search, mode: 'insensitive' } },

@@ -55,6 +55,7 @@ export default function JobsPage() {
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
+  const [easyApplyOnly, setEasyApplyOnly] = useState(true);
   const [statusMsg, setStatusMsg] = useState('');
   const [applyingJobId, setApplyingJobId] = useState<string | null>(null);
   const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
@@ -64,7 +65,7 @@ export default function JobsPage() {
     setLoading(true);
     try {
       const { data } = await API.get(
-        `/jobs?search=${encodeURIComponent(search)}&page=${targetPage}&limit=20`,
+        `/jobs?search=${encodeURIComponent(search)}&page=${targetPage}&limit=20${easyApplyOnly ? '&isEasyApply=true' : ''}`,
       );
       setJobs(data.data ?? []);
       setTotalPages(data.meta?.totalPages ?? 1);
@@ -217,6 +218,11 @@ export default function JobsPage() {
     fetchJobs(1);
   };
 
+  const handleEasyApplyToggle = () => {
+    setEasyApplyOnly((prev) => !prev);
+    setTimeout(() => fetchJobs(1), 0);
+  };
+
   const handlePageChange = (newPage: number) => {
     if (newPage < 1 || newPage > totalPages) return;
     fetchJobs(newPage);
@@ -307,6 +313,20 @@ export default function JobsPage() {
           className="bg-gray-800 hover:bg-gray-700 text-white px-5 py-2.5 rounded-lg text-sm font-medium"
         >
           Search
+        </button>
+      </div>
+
+      <div className="mb-4 flex items-center justify-end">
+        <button
+          type="button"
+          onClick={handleEasyApplyToggle}
+          className={`px-3 py-2 rounded-lg border text-sm font-medium transition-colors ${
+            easyApplyOnly
+              ? 'bg-blue-600 text-white border-blue-500'
+              : 'bg-gray-900 text-gray-300 border-gray-700 hover:bg-gray-800'
+          }`}
+        >
+          {easyApplyOnly ? 'Direct Apply Only: ON' : 'Direct Apply Only: OFF'}
         </button>
       </div>
 
