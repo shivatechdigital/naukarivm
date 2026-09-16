@@ -53,16 +53,22 @@ export default function JobsPage() {
   const [loading, setLoading] = useState(true);
   const [scraping, setScraping] = useState(false);
   const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
   const [statusMsg, setStatusMsg] = useState('');
   const [applyingJobId, setApplyingJobId] = useState<string | null>(null);
-const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
+  const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
   const [applyingAll, setApplyingAll] = useState(false);
 
-  const fetchJobs = async () => {
+  const fetchJobs = async (targetPage = page) => {
     setLoading(true);
     try {
-      const { data } = await API.get(`/jobs?search=${search}&limit=20`);
-      setJobs(data.data);
+      const { data } = await API.get(
+        `/jobs?search=${encodeURIComponent(search)}&page=${targetPage}&limit=20`,
+      );
+      setJobs(data.data ?? []);
+      setTotalPages(data.meta?.totalPages ?? 1);
+      setPage(targetPage);
     } catch (err) {
       console.error(err);
     } finally {
@@ -71,7 +77,7 @@ const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
   };
 
   useEffect(() => {
-    fetchJobs();
+    fetchJobs(1);
   }, []);
 
   const handleTriggerScrape = async () => {
@@ -84,7 +90,7 @@ const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
       });
 
       setStatusMsg(`🎉 ${data.jobsSaved} fresh jobs scraped!`);
-      await fetchJobs();
+      await fetchJobs(1);
     } catch (err: any) {
       const response = err?.response;
       const errorData = response?.data;
@@ -126,7 +132,7 @@ const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
 
       notifyApplicationsUpdated();
       setStatusMsg(data?.message || 'Application processed successfully.');
-      await fetchJobs();
+      await fetchJobs(page);
     } catch (err: any) {
       setStatusMsg(
         err?.response?.data?.message ||
@@ -201,10 +207,19 @@ const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
         `Apply All complete: ${applied} applied, ${alreadyApplied} already applied, ${failed} failed, ${skipped} skipped.`,
       );
 
-      await fetchJobs();
+      await fetchJobs(page);
     } finally {
       setApplyingAll(false);
     }
+  };
+
+  const handleSearch = () => {
+    fetchJobs(1);
+  };
+
+  const handlePageChange = (newPage: number) => {
+    if (newPage < 1 || newPage > totalPages) return;
+    fetchJobs(newPage);
   };
 
   return (
@@ -283,12 +298,12 @@ const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
             placeholder="Search by title, company, or skill..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && fetchJobs()}
+            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
             className="w-full bg-gray-900 border border-gray-800 rounded-lg pl-10 pr-4 py-2.5 text-white placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:outline-none"
           />
         </div>
         <button
-          onClick={fetchJobs}
+          onClick={handleSearch}
           className="bg-gray-800 hover:bg-gray-700 text-white px-5 py-2.5 rounded-lg text-sm font-medium"
         >
           Search
@@ -415,6 +430,30 @@ const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
               </div>
             </div>
           ))}
+
+          {totalPages > 1 && (
+            <div className="flex items-center justify-center gap-3 pt-4">
+              <button
+                onClick={() => handlePageChange(page - 1)}
+                disabled={page === 1 || loading}
+                className="bg-gray-800 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed text-white px-3 py-2 rounded-lg text-sm"
+              >
+                Previous
+              </button>
+
+              <span className="text-sm text-gray-300">
+                Page {page} of {totalPages}
+              </span>
+
+              <button
+                onClick={() => handlePageChange(page + 1)}
+                disabled={page === totalPages || loading}
+                className="bg-gray-800 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed text-white px-3 py-2 rounded-lg text-sm"
+              >
+                Next
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
